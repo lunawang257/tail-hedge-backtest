@@ -6,3 +6,8 @@ __pycache__/
 *-summary.csv
 *.log
 .pytest_cache/
+data/cache/
+spx-search-*.csv
+spx-search-*.pid
+spx-search-*.log
+w-spy-*.csv

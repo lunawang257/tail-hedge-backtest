@@ -139,21 +139,40 @@ class PositionsAndStats:
         return (group_date, float(self.total_shares()), opt_state)
 
     def mark_option(self, opt, price_group) -> float:
-        """Mid mark for one option position (per share)."""
-        price_lookup = self.get_price_lookup(price_group)
-        opt_quote = price_lookup.find_exact(opt.opt_type, opt.strike, opt.exp_date)
-        target_date = price_group['DataDate'].iloc[0]
-        if opt_quote is not None:
-            return (opt_quote['BidPrice'] + opt_quote['AskPrice']) / 2
+        """Mid mark for one option position (per share).
 
-        self.num_data_missing += 1
-        if opt.exp_date is not None and pd.Timestamp(opt.exp_date) <= pd.Timestamp(target_date):
-            # Expired European: intrinsic only (assignment ignored by design)
-            spot = float(price_group['UnderlyingPrice'].iloc[0])
+        Prefer Black-Scholes with the position's last known IV (fast). Fall back
+        to the live chain mid only when IV is unavailable.
+        """
+        target_date = pd.Timestamp(price_group['DataDate'].iloc[0])
+        spot = float(price_group['UnderlyingPrice'].iloc[0])
+        if opt.exp_date is not None and pd.Timestamp(opt.exp_date) <= target_date:
             if opt.opt_type == 'p':
                 return max(0.0, float(opt.strike) - spot)
             return max(0.0, spot - float(opt.strike))
 
+        if getattr(opt, 'implied_vol', 0) and opt.implied_vol > 0:
+            from PriceDataUtil import get_risk_free_rate, get_dividend_yield, merton
+            import math
+            days = (pd.Timestamp(opt.exp_date) - target_date).days
+            t = max(days / 365.25, 1e-6)
+            try:
+                r = get_risk_free_rate(target_date, t)
+                q = get_dividend_yield(target_date)
+                value, *_ = merton(
+                    opt.opt_type, fs=spot, x=float(opt.strike), t=t,
+                    r=r, q=q, v=float(opt.implied_vol))
+                if math.isfinite(value):
+                    return float(value)
+            except Exception:
+                pass
+
+        price_lookup = self.get_price_lookup(price_group)
+        opt_quote = price_lookup.find_exact(opt.opt_type, opt.strike, opt.exp_date)
+        if opt_quote is not None:
+            return (opt_quote['BidPrice'] + opt_quote['AskPrice']) / 2
+
+        self.num_data_missing += 1
         return calculate_option_price_black_scholes(
             price_group, opt.opt_type, opt.strike, opt.exp_date,
             all_data=self.all_data)

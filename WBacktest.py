@@ -39,18 +39,59 @@ def setup_run_log(log_path):
     return log_stream
 
 
-def load_options_csv(path):
+def load_options_csv(path, start_date=None, end_date=None, trade_every_n_days=1):
+    """Load options CSV, optionally filtering by date and thinning sessions.
+
+    Large files (e.g. SPX.csv) are read in chunks so date filters apply before
+    the full frame is materialised.
+    """
     print(f'Loading {path} ...', file=sys.stderr)
+    start_ts = pd.Timestamp(start_date).normalize() if start_date else None
+    end_ts = pd.Timestamp(end_date).normalize() if end_date else None
+
+    usecols = [
+        'Symbol', 'ExpirationDate', 'AskPrice', 'BidPrice', 'LastPrice',
+        'PutCall', 'StrikePrice', 'UnderlyingPrice', 'DataDate',
+    ]
+    reader_kwargs = {'usecols': usecols, 'chunksize': 500_000}
     if path.endswith('.gz'):
-        df = pd.read_csv(path, compression='gzip')
-    else:
-        df = pd.read_csv(path)
-    df['DataDate'] = pd.to_datetime(df['DataDate'])
+        reader_kwargs['compression'] = 'gzip'
+
+    chunks = []
+    total_rows = 0
+    for chunk in pd.read_csv(path, **reader_kwargs):
+        chunk['DataDate'] = pd.to_datetime(chunk['DataDate'])
+        if start_ts is not None:
+            chunk = chunk[chunk['DataDate'] >= start_ts]
+        if end_ts is not None:
+            chunk = chunk[chunk['DataDate'] <= end_ts]
+        if chunk.empty:
+            continue
+        total_rows += len(chunk)
+        chunks.append(chunk)
+
+    if not chunks:
+        raise ValueError(
+            f'No rows loaded from {path} for date filter {start_date}..{end_date}')
+
+    df = pd.concat(chunks, ignore_index=True)
     df['ExpirationDate'] = pd.to_datetime(df['ExpirationDate'])
     df['PutCall'] = df['PutCall'].str.lower().str[0]
     df = adjust_prices_for_splits_and_merges(df)
+
+    if trade_every_n_days and trade_every_n_days > 1:
+        dates = sorted(df['DataDate'].dt.normalize().unique())
+        keep = set(dates[::trade_every_n_days])
+        keep.add(dates[0])
+        keep.add(dates[-1])
+        before = df['DataDate'].nunique()
+        df = df[df['DataDate'].dt.normalize().isin(keep)].copy()
+        print(f'  thinned sessions {before} → {df["DataDate"].nunique()} '
+              f'(every {trade_every_n_days} days)', file=sys.stderr)
+
     print(f'  rows={len(df)} days={df["DataDate"].nunique()} '
-          f'{df["DataDate"].min().date()} → {df["DataDate"].max().date()}',
+          f'{df["DataDate"].min().date()} → {df["DataDate"].max().date()} '
+          f'(filtered rows {total_rows})',
           file=sys.stderr)
     return df
 
@@ -89,6 +130,19 @@ def resolve_yield_path(path):
         f'or pass -y. Tried: {candidates}')
 
 
+class _NullDictWriter:
+    """No-op CSV writer used for --summary-only sweeps."""
+
+    def __init__(self, fieldnames=None):
+        self.fieldnames = fieldnames or []
+
+    def writeheader(self):
+        return None
+
+    def writerow(self, row):
+        return None
+
+
 def main():
     global Debug
     parser = argparse.ArgumentParser(
@@ -110,6 +164,12 @@ def main():
     parser.add_argument('-d', '--debug', action='store_true')
     parser.add_argument('--balance', type=float, default=1_000_000,
                         help='Initial cash balance')
+    parser.add_argument('--start-date', default='',
+                        help='Inclusive start date YYYY-MM-DD (optional)')
+    parser.add_argument('--end-date', default='',
+                        help='Inclusive end date YYYY-MM-DD (optional)')
+    parser.add_argument('--trade-every-n-days', type=int, default=1,
+                        help='Keep every Nth trading session (1=all days)')
 
     # W structure
     parser.add_argument('--short-dte', default='30',
@@ -143,6 +203,8 @@ def main():
     parser.add_argument('--gamma-scalp-stop-delta', type=float, default=0.05)
     parser.add_argument('--no-gamma-scalp', action='store_true')
     parser.add_argument('--no-expected-pnl', action='store_true')
+    parser.add_argument('--summary-only', action='store_true',
+                        help='Skip writing detail trade rows (faster sweeps)')
 
     args = parser.parse_args()
     Debug = args.debug
@@ -158,9 +220,13 @@ def main():
     print(f'Output: {args.output_path} {args.summary_output_path}', file=sys.stderr)
     print(f'Log: {log_path}', file=sys.stderr)
 
-    fout_detail = open(args.output_path, 'w', encoding='UTF8', newline='')
-    detail_writer = csv.DictWriter(fout_detail, fieldnames=Monthly_fields)
-    detail_writer.writeheader()
+    if args.summary_only:
+        detail_writer = _NullDictWriter(Monthly_fields)
+        fout_detail = None
+    else:
+        fout_detail = open(args.output_path, 'w', encoding='UTF8', newline='')
+        detail_writer = csv.DictWriter(fout_detail, fieldnames=Monthly_fields)
+        detail_writer.writeheader()
 
     fout_sum = open(args.summary_output_path, 'w', encoding='UTF8', newline='')
     sum_writer = csv.DictWriter(fout_sum, fieldnames=Summary_fields)
@@ -201,7 +267,12 @@ def main():
         sys.exit(1)
     print(f'Parameter sets: {len(params)}', file=sys.stderr)
 
-    df = load_options_csv(input_path)
+    df = load_options_csv(
+        input_path,
+        start_date=args.start_date or None,
+        end_date=args.end_date or None,
+        trade_every_n_days=max(1, args.trade_every_n_days),
+    )
     t0 = time.time()
     results = []
     for i, param in enumerate(params):
@@ -227,7 +298,8 @@ def main():
               file=sys.stderr)
 
     print(f'Done in {time.time() - t0:.1f}s', file=sys.stderr)
-    fout_detail.close()
+    if fout_detail is not None:
+        fout_detail.close()
     fout_sum.close()
     log_stream.close()
 

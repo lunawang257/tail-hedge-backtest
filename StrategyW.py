@@ -36,6 +36,16 @@ def _log(debug, msg):
 def update_greeks(param, date, stock_price, stat):
     """Refresh per-contract greeks on all open option legs."""
     for opt in stat.opt_list:
+        if opt.exp_date is not None and pd.Timestamp(opt.exp_date) <= pd.Timestamp(date):
+            opt.per_contract_delta = -1.0 if opt.opt_type == 'p' else 1.0
+            # near/at expiry intrinsic delta approx; gamma/theta ~ 0
+            if opt.opt_type == 'p':
+                opt.per_contract_delta = -1.0 if stock_price < opt.strike else 0.0
+            else:
+                opt.per_contract_delta = 1.0 if stock_price > opt.strike else 0.0
+            opt.per_contract_gamma = 0.0
+            opt.per_contract_theta = 0.0
+            continue
         try:
             g = greeks_iv(param, date, stock_price, opt)
             opt.per_contract_delta = g['delta']
@@ -444,11 +454,23 @@ def w_strategy(df, param, debug=False, PositionsAndStats=None):
     """Run the W strategy over a daily options DataFrame grouped by DataDate."""
     assert PositionsAndStats is not None
     stat = PositionsAndStats()
-    stat.all_data = df
+    # Work on a compact frame; normalize once for fast expiry joins
+    work = df
+    if 'ExpirationDate' in work.columns:
+        if not pd.api.types.is_datetime64_any_dtype(work['ExpirationDate']):
+            work = work.copy()
+            work['ExpirationDate'] = pd.to_datetime(work['ExpirationDate'])
+        # Ensure normalized dates without rewriting huge frames repeatedly
+        if getattr(work, '_w_norm_exp', None) is None:
+            work = work.copy()
+            work['ExpirationDate'] = work['ExpirationDate'].dt.normalize()
+            work['DataDate'] = work['DataDate'].dt.normalize()
+            work._w_norm_exp = True
+    stat.all_data = work
     stat.cash = param.fixed_param.initial_balance
 
-    grouped = df.groupby('DataDate', sort=True)
-    dates = list(grouped.groups.keys())
+    grouped = {d: g for d, g in work.groupby('DataDate', sort=True)}
+    dates = list(grouped.keys())
     if not dates:
         return {'error': 'no data'}
 
@@ -458,7 +480,7 @@ def w_strategy(df, param, debug=False, PositionsAndStats=None):
     prev_year = start_date.year
 
     for i, raw_date in enumerate(dates):
-        group = grouped.get_group(raw_date)
+        group = grouped[raw_date]
         date = pd.Timestamp(raw_date).normalize()
         stock_price = float(group['UnderlyingPrice'].iloc[0])
         spots_history.append(stock_price)
@@ -474,7 +496,9 @@ def w_strategy(df, param, debug=False, PositionsAndStats=None):
             year_end_tax(param, date - pd.Timedelta(days=1), stat, debug=debug)
             prev_year = date.year
 
-        update_greeks(param, date, stock_price, stat)
+        # Greeks only when needed for gamma-scalp decisions
+        if param.enable_gamma_scalp and stat.opt_list:
+            update_greeks(param, date, stock_price, stat)
 
         # Close/roll rules
         if stat.opt_list:
@@ -490,7 +514,11 @@ def w_strategy(df, param, debug=False, PositionsAndStats=None):
             open_w_structure(param, date, group, stat, debug=debug)
 
         # Periodic expected P/L (weekly-ish: every 5 sessions)
-        if i % 5 == 0:
+        if param.eval_expected_pnl and i % 5 == 0:
+            if param.enable_gamma_scalp:
+                pass  # already updated
+            else:
+                update_greeks(param, date, stock_price, stat)
             maybe_mark_expected_pnl(
                 param, date, group, stat, spots_history, debug=debug)
 
@@ -498,7 +526,7 @@ def w_strategy(df, param, debug=False, PositionsAndStats=None):
         calc_drawdown(stat, date_str, nlv + stat.cash)
 
     # Final close
-    last_group = grouped.get_group(dates[-1])
+    last_group = grouped[dates[-1]]
     last_date = pd.Timestamp(dates[-1]).normalize()
     if stat.opt_list:
         close_all_options(param, last_date, last_group, stat, 'final', debug=debug)

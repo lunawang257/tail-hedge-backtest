@@ -183,6 +183,9 @@ def add_summary_csv_row(param=None, annualReturn=0, maxDrawdown=0,
                         taxRate=0, commRate=0, totalOptGain=0, totalStkGain=0,
                         expectedPnL=0, numRolls=0, numGammaHedges=0):
     """Add a summary row to the summary CSV file."""
+    writer = getattr(param.fixed_param, 'summary_writer', None)
+    if writer is None or not getattr(writer, 'fieldnames', None):
+        return
     row = init_csv_row(param, Summary_fields)
     add_val(row, 'annualReturn', f'{round_float(annualReturn)}%')
     add_val(row, 'maxDrawdown', f'{round_float(maxDrawdown)}%')
@@ -193,7 +196,7 @@ def add_summary_csv_row(param=None, annualReturn=0, maxDrawdown=0,
     add_val(row, 'expectedPnL', expectedPnL)
     add_val(row, 'numRolls', numRolls)
     add_val(row, 'numGammaHedges', numGammaHedges)
-    param.fixed_param.summary_writer.writerow(row)
+    writer.writerow(row)
 
 
 def add_monthly_csv_row(param=None, date='', action='buy', entType='stock',

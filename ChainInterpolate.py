@@ -26,7 +26,12 @@ from PriceDataUtil import (
 
 def available_expirations(group, as_of=None):
     """Sorted unique expiration dates on or after as_of (today)."""
-    exps = sorted(pd.Timestamp(e).normalize() for e in group['ExpirationDate'].unique())
+    exps = group['ExpirationDate']
+    if hasattr(exps, 'dt'):
+        vals = exps.drop_duplicates().tolist()
+    else:
+        vals = list(exps.unique())
+    exps = sorted(pd.Timestamp(e).normalize() for e in vals)
     if as_of is None:
         return exps
     as_of = pd.Timestamp(as_of).normalize()
@@ -318,10 +323,23 @@ def find_option_by_delta(group, opt_type, as_of, stock_price, target_abs_delta,
     listed_dte = max((nearest - as_of).days, 1)
     use_dte = target_dte if allow_interpolate else listed_dte
 
+    # Bound strike search around spot — critical for dense SPX chains
+    # Wide wings for small deltas, tighter for near-ATM shorts.
+    width = 0.08 + 0.55 * (1.0 - abs(target_abs_delta))
+    lo_k = stock_price * (1.0 - width)
+    hi_k = stock_price * (1.0 + width)
+
     candidates = group[
         (group['PutCall'] == opt_type) &
-        (group['ExpirationDate'].dt.normalize() == nearest)
+        (group['ExpirationDate'].dt.normalize() == nearest) &
+        (group['StrikePrice'] >= lo_k) &
+        (group['StrikePrice'] <= hi_k)
     ]
+    if candidates.empty:
+        candidates = group[
+            (group['PutCall'] == opt_type) &
+            (group['ExpirationDate'].dt.normalize() == nearest)
+        ]
     if candidates.empty:
         return None
 
@@ -358,19 +376,17 @@ def find_option_by_delta(group, opt_type, as_of, stock_price, target_abs_delta,
     best = None
     best_err = None
     for err_approx, k, mid, row in ranked[:_DELTA_SHORTLIST]:
-        if allow_interpolate and listed_dte != target_dte:
+        # Prefer listed nearest expiry pricing unless target DTE differs a lot
+        price_dte = use_dte if allow_interpolate else listed_dte
+        if allow_interpolate and abs(listed_dte - target_dte) >= 2:
             quote = synthetic_option_quote(
                 group, opt_type, as_of, stock_price, k, target_dte,
                 slip_pct=slip_pct, iv_cache=iv_cache)
         else:
-            # Use listed expiry / mid; compute exact greeks from mid IV
             quote = synthetic_option_quote(
                 group, opt_type, as_of, stock_price, k, listed_dte,
                 slip_pct=slip_pct, iv_cache=iv_cache)
-            if quote is not None and not quote.get('interpolated'):
-                pass
-            elif quote is None:
-                # Fall back to listed mid with anchor IV
+            if quote is None:
                 try:
                     value, delta, gamma, theta, vega, rho = merton(
                         opt_type, fs=stock_price, x=k, t=max(listed_dte, 1) / 365.25,
@@ -390,7 +406,7 @@ def find_option_by_delta(group, opt_type, as_of, stock_price, target_abs_delta,
                     'delta': float(delta),
                     'gamma': float(gamma),
                     'theta': float(theta),
-                    'interpolated': listed_dte != target_dte,
+                    'interpolated': abs(listed_dte - target_dte) >= 2,
                     'mid': float(value),
                 }
         if quote is None:
