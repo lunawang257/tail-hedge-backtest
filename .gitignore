@@ -1,0 +1,8 @@
+*~
+env
+__pycache__/
+*.details.csv
+*-details.csv
+*-summary.csv
+*.log
+.pytest_cache/
