@@ -100,6 +100,7 @@ class PositionsAndStats:
         self.num_rolls = 0
         self.num_gamma_hedges = 0
         self.last_expected_pnl = 0.0
+        self.last_wing_m = (0, 0)
         self.trades = []
         self.gamma_scalping_active = False
 

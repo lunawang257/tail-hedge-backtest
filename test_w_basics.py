@@ -6,9 +6,12 @@ import pandas as pd
 
 from PriceDataUtil import load_yield_data, adjust_prices_for_splits_and_merges
 from ChainInterpolate import find_option_by_delta, bracketing_expirations
-from ExpectedPnL import lognormal_probs, expected_structure_pnl
+from ExpectedPnL import (
+    lognormal_probs, expected_structure_pnl, expected_pnl_by_ranges,
+)
 from OptionPos import OptPosition
 from Param import WParam, FixedParam, parse_float_range
+from StrategyW import choose_wing_counts
 
 
 def test_parse_range():
@@ -27,6 +30,29 @@ def test_wparam_validation():
         assert False, 'expected ValueError'
     except ValueError:
         pass
+    c = WParam(fixed_param=fp, wing_mode='credit', n_call=10, n_put=10,
+               m_call=10, m_put=10, max_wing_mult=3)
+    assert c.wing_mode == 'credit'
+    t = WParam(fixed_param=fp, wing_mode='theta', theta_threshold=0.0)
+    assert 'theta' in t.label()
+
+
+def test_choose_wing_credit_and_theta():
+    fp = FixedParam()
+    short_c = {'mid': 10.0, 'BidPrice': 9.9, 'AskPrice': 10.1, 'theta': -0.05}
+    short_p = {'mid': 10.0, 'BidPrice': 9.9, 'AskPrice': 10.1, 'theta': -0.05}
+    long_c = {'mid': 1.5, 'BidPrice': 1.4, 'AskPrice': 1.6, 'theta': -0.02}
+    long_p = {'mid': 1.5, 'BidPrice': 1.4, 'AskPrice': 1.6, 'theta': -0.02}
+    p = WParam(fixed_param=fp, wing_mode='credit', n_call=10, n_put=10,
+               m_call=10, m_put=10, credit_buffer=0.02, max_wing_mult=5)
+    mc, mp = choose_wing_counts(p, short_c, short_p, long_c, long_p)
+    assert mc >= 10 and mp >= 10
+    assert mc > 10
+
+    p2 = WParam(fixed_param=fp, wing_mode='theta', n_call=10, n_put=10,
+                m_call=10, m_put=10, theta_threshold=0.0, max_wing_mult=5)
+    mc2, mp2 = choose_wing_counts(p2, short_c, short_p, long_c, long_p)
+    assert mc2 >= 10
 
 
 def test_find_by_delta_and_expected_pnl():
@@ -54,6 +80,11 @@ def test_find_by_delta_and_expected_pnl():
     assert q['StrikePrice'] > 0
     assert abs(q['delta']) > 0
 
+    # Weekly/daily synthetic tenor (odd DTE) should still resolve
+    q_w = find_option_by_delta(group, 'c', day, spot, 0.40, 9)
+    assert q_w is not None
+    assert q_w['StrikePrice'] > 0
+
     legs = []
     for opt_type, abs_d, dte, n in [
         ('c', 0.4, 30, -1), ('p', 0.4, 30, -1),
@@ -74,8 +105,14 @@ def test_find_by_delta_and_expected_pnl():
         spots_history=[spot] * 30, horizon_days=5)
     assert math.isfinite(exp)
     assert abs(sum(probs.values()) - 1.0) < 1e-6
-    # Wing structure: large down move should beat flat for puts-heavy wings
     assert 0.0 in pnls
+
+    exp2, rows, _, _ = expected_pnl_by_ranges(
+        legs, spot, day, entry,
+        ranges=[(-0.10, -0.04), (-0.04, 0.04), (0.04, 0.10)],
+        spots_history=[spot] * 30, horizon_days=5)
+    assert math.isfinite(exp2)
+    assert len(rows) == 3
 
 
 def test_lognormal_probs_sum():
@@ -86,6 +123,7 @@ def test_lognormal_probs_sum():
 if __name__ == '__main__':
     test_parse_range()
     test_wparam_validation()
+    test_choose_wing_credit_and_theta()
     test_lognormal_probs_sum()
     test_find_by_delta_and_expected_pnl()
     print('All tests passed.')

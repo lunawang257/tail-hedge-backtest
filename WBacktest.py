@@ -182,10 +182,20 @@ def main():
                         help='|delta| for long legs')
     parser.add_argument('--n-call', type=int, default=1)
     parser.add_argument('--n-put', type=int, default=1)
-    parser.add_argument('--m-call', type=int, default=2)
-    parser.add_argument('--m-put', type=int, default=2)
+    parser.add_argument('--m-call', default='2',
+                        help='Long call contracts (fixed mode): v or start,stop,step')
+    parser.add_argument('--m-put', default='2',
+                        help='Long put contracts (fixed mode): v or start,stop,step')
     parser.add_argument('--units', type=int, default=1,
                         help='Number of W units (scales all contract counts)')
+    parser.add_argument('--wing-mode', default='fixed',
+                        help='Wing sizing: fixed,credit,theta (comma-separated for sweep)')
+    parser.add_argument('--credit-buffer', default='0.02',
+                        help='For credit mode: longs cost <= (1-buffer)*short premium')
+    parser.add_argument('--theta-threshold', default='0',
+                        help='For theta mode: keep net θ >= this ($/day per unit)')
+    parser.add_argument('--max-wing-mult', default='5',
+                        help='Cap M <= max_wing_mult * N for dynamic wing modes')
 
     # Roll / close rules
     parser.add_argument('--roll-dte', default='7',
@@ -249,6 +259,10 @@ def main():
         'm_call': args.m_call,
         'm_put': args.m_put,
         'units': args.units,
+        'wing_mode': args.wing_mode,
+        'credit_buffer': args.credit_buffer,
+        'theta_threshold': args.theta_threshold,
+        'max_wing_mult': args.max_wing_mult,
         'roll_dte': args.roll_dte,
         'roll_on_expiry': not args.no_roll_on_expiry,
         'profit_take_pct': args.profit_take_pct,

@@ -2,6 +2,9 @@
 """Parameter classes for the W tail-hedge strategy."""
 
 
+WING_MODES = ('fixed', 'credit', 'theta')
+
+
 class FixedParam:
     """Fixed parameters that don't change during optimization."""
 
@@ -30,9 +33,11 @@ class WParam:
     """Parameters for one W-strategy configuration.
 
     Short legs collect premium near ATM; long legs hedge tails with smaller
-    absolute delta. M_* must be >= N_* so the wings can out-earn short losses
-    in a large move. Prefer total long |theta| < total short |theta| so the
-    book does not bleed when the market is quiet.
+    absolute delta. Wing sizing:
+      - fixed: use m_call / m_put (must be >= n_*)
+      - credit: raise M while structure stays net credit (longs cost slightly
+        less than short premium)
+      - theta: raise M while net structure theta stays >= theta_threshold
     """
 
     def __init__(self,
@@ -43,12 +48,17 @@ class WParam:
                  # Absolute deltas used to pick strikes (|delta|)
                  short_delta=0.40,
                  long_delta=0.10,
-                 # Contract counts per W unit (shorts N, longs M, M >= N)
+                 # Contract counts per W unit (shorts N, longs M)
                  n_call=1,
                  n_put=1,
                  m_call=2,
                  m_put=2,
                  units=1,
+                 # Wing sizing mode
+                 wing_mode='fixed',
+                 credit_buffer=0.02,       # longs may cost up to (1-buffer)*short credit
+                 theta_threshold=0.0,      # min net theta ($/day, per unit scale)
+                 max_wing_mult=5,          # M <= max_wing_mult * max(N)
                  # Close / roll rules
                  roll_dte=7,                 # roll when short DTE <= this
                  roll_on_expiry=True,        # also roll when short expired
@@ -75,6 +85,10 @@ class WParam:
         self.m_call = int(m_call)
         self.m_put = int(m_put)
         self.units = int(units)
+        self.wing_mode = str(wing_mode).lower().strip()
+        self.credit_buffer = float(credit_buffer)
+        self.theta_threshold = float(theta_threshold)
+        self.max_wing_mult = int(max_wing_mult)
         self.roll_dte = int(roll_dte)
         self.roll_on_expiry = bool(roll_on_expiry)
         self.profit_take_pct = float(profit_take_pct) / 100.0
@@ -94,11 +108,23 @@ class WParam:
         else:
             self.expected_pnl_move_pcts = list(expected_pnl_move_pcts)
 
-        if self.m_call < self.n_call or self.m_put < self.n_put:
+        if self.wing_mode not in WING_MODES:
             raise ValueError(
-                f'Long contracts must be >= short: '
-                f'M_call={self.m_call} N_call={self.n_call} '
-                f'M_put={self.m_put} N_put={self.n_put}')
+                f'wing_mode must be one of {WING_MODES}, got {self.wing_mode!r}')
+        if self.wing_mode == 'fixed':
+            if self.m_call < self.n_call or self.m_put < self.n_put:
+                raise ValueError(
+                    f'Long contracts must be >= short: '
+                    f'M_call={self.m_call} N_call={self.n_call} '
+                    f'M_put={self.m_put} N_put={self.n_put}')
+        else:
+            # Dynamic modes start from at least N wings
+            self.m_call = max(self.m_call, self.n_call)
+            self.m_put = max(self.m_put, self.n_put)
+        if self.max_wing_mult < 1:
+            raise ValueError('max_wing_mult must be >= 1')
+        if not (0.0 <= self.credit_buffer < 1.0):
+            raise ValueError('credit_buffer must be in [0, 1)')
         if self.long_dte < self.short_dte:
             raise ValueError(
                 f'long_dte ({self.long_dte}) must be >= short_dte ({self.short_dte})')
@@ -108,9 +134,16 @@ class WParam:
                 f'short_delta ({self.short_delta}) < 1')
 
     def label(self) -> str:
+        wing = self.wing_mode
+        if wing == 'fixed':
+            wing_s = f'M={self.m_call}/{self.m_put}'
+        elif wing == 'credit':
+            wing_s = f'wing=credit(buf={self.credit_buffer:.2f},cap={self.max_wing_mult}x)'
+        else:
+            wing_s = f'wing=theta(θ≥{self.theta_threshold:.0f},cap={self.max_wing_mult}x)'
         return (f'sDTE={self.short_dte} lDTE={self.long_dte} '
                 f'sΔ={self.short_delta:.2f} lΔ={self.long_delta:.2f} '
-                f'N={self.n_call}/{self.n_put} M={self.m_call}/{self.m_put} '
+                f'N={self.n_call}/{self.n_put} {wing_s} '
                 f'roll={self.roll_dte} γscalp={int(self.enable_gamma_scalp)}'
                 f'@{self.gamma_scalp_delta_thresh:.2f}')
 
@@ -143,6 +176,11 @@ def parse_float_range(spec, as_int=False):
     return out
 
 
+def parse_csv_list(spec):
+    """Parse comma-separated tokens (e.g. wing modes)."""
+    return [p.strip() for p in str(spec).split(',') if p.strip() != '']
+
+
 def expand_w_params(fixed_param, args_dict):
     """Cartesian product of ranged W parameters from CLI-style dict."""
     short_dtes = parse_float_range(args_dict['short_dte'], as_int=True)
@@ -151,6 +189,12 @@ def expand_w_params(fixed_param, args_dict):
     long_deltas = parse_float_range(args_dict['long_delta'])
     roll_dtes = parse_float_range(args_dict['roll_dte'], as_int=True)
     gamma_threshs = parse_float_range(args_dict['gamma_scalp_delta_thresh'])
+    wing_modes = parse_csv_list(args_dict.get('wing_mode', 'fixed'))
+    m_calls = parse_float_range(str(args_dict.get('m_call', 2)), as_int=True)
+    m_puts = parse_float_range(str(args_dict.get('m_put', 2)), as_int=True)
+    credit_buffers = parse_float_range(str(args_dict.get('credit_buffer', 0.02)))
+    theta_thresholds = parse_float_range(str(args_dict.get('theta_threshold', 0.0)))
+    max_wing_mults = parse_float_range(str(args_dict.get('max_wing_mult', 5)), as_int=True)
 
     params = []
     for sd in short_dtes:
@@ -163,27 +207,96 @@ def expand_w_params(fixed_param, args_dict):
                         continue
                     for rd in roll_dtes:
                         for gth in gamma_threshs:
-                            params.append(WParam(
-                                fixed_param=fixed_param,
-                                short_dte=sd,
-                                long_dte=ld,
-                                short_delta=sdelta,
-                                long_delta=ldelta,
-                                n_call=args_dict['n_call'],
-                                n_put=args_dict['n_put'],
-                                m_call=args_dict['m_call'],
-                                m_put=args_dict['m_put'],
-                                units=args_dict['units'],
-                                roll_dte=rd,
-                                roll_on_expiry=args_dict['roll_on_expiry'],
-                                profit_take_pct=args_dict['profit_take_pct'],
-                                loss_cut_pct=args_dict['loss_cut_pct'],
-                                enable_profit_take=args_dict['enable_profit_take'],
-                                enable_loss_cut=args_dict['enable_loss_cut'],
-                                enable_dte_roll=args_dict['enable_dte_roll'],
-                                enable_gamma_scalp=args_dict['enable_gamma_scalp'],
-                                gamma_scalp_delta_thresh=gth,
-                                gamma_scalp_stop_delta=args_dict['gamma_scalp_stop_delta'],
-                                eval_expected_pnl=args_dict['eval_expected_pnl'],
-                            ))
+                            for wing in wing_modes:
+                                wing = wing.lower()
+                                if wing == 'fixed':
+                                    for mc in m_calls:
+                                        for mp in m_puts:
+                                            params.append(WParam(
+                                                fixed_param=fixed_param,
+                                                short_dte=sd,
+                                                long_dte=ld,
+                                                short_delta=sdelta,
+                                                long_delta=ldelta,
+                                                n_call=args_dict['n_call'],
+                                                n_put=args_dict['n_put'],
+                                                m_call=mc,
+                                                m_put=mp,
+                                                units=args_dict['units'],
+                                                wing_mode='fixed',
+                                                credit_buffer=credit_buffers[0],
+                                                theta_threshold=theta_thresholds[0],
+                                                max_wing_mult=max_wing_mults[0],
+                                                roll_dte=rd,
+                                                roll_on_expiry=args_dict['roll_on_expiry'],
+                                                profit_take_pct=args_dict['profit_take_pct'],
+                                                loss_cut_pct=args_dict['loss_cut_pct'],
+                                                enable_profit_take=args_dict['enable_profit_take'],
+                                                enable_loss_cut=args_dict['enable_loss_cut'],
+                                                enable_dte_roll=args_dict['enable_dte_roll'],
+                                                enable_gamma_scalp=args_dict['enable_gamma_scalp'],
+                                                gamma_scalp_delta_thresh=gth,
+                                                gamma_scalp_stop_delta=args_dict['gamma_scalp_stop_delta'],
+                                                eval_expected_pnl=args_dict['eval_expected_pnl'],
+                                            ))
+                                elif wing == 'credit':
+                                    for buf in credit_buffers:
+                                        for cap in max_wing_mults:
+                                            params.append(WParam(
+                                                fixed_param=fixed_param,
+                                                short_dte=sd,
+                                                long_dte=ld,
+                                                short_delta=sdelta,
+                                                long_delta=ldelta,
+                                                n_call=args_dict['n_call'],
+                                                n_put=args_dict['n_put'],
+                                                m_call=args_dict['n_call'],
+                                                m_put=args_dict['n_put'],
+                                                units=args_dict['units'],
+                                                wing_mode='credit',
+                                                credit_buffer=buf,
+                                                theta_threshold=theta_thresholds[0],
+                                                max_wing_mult=cap,
+                                                roll_dte=rd,
+                                                roll_on_expiry=args_dict['roll_on_expiry'],
+                                                profit_take_pct=args_dict['profit_take_pct'],
+                                                loss_cut_pct=args_dict['loss_cut_pct'],
+                                                enable_profit_take=args_dict['enable_profit_take'],
+                                                enable_loss_cut=args_dict['enable_loss_cut'],
+                                                enable_dte_roll=args_dict['enable_dte_roll'],
+                                                enable_gamma_scalp=args_dict['enable_gamma_scalp'],
+                                                gamma_scalp_delta_thresh=gth,
+                                                gamma_scalp_stop_delta=args_dict['gamma_scalp_stop_delta'],
+                                                eval_expected_pnl=args_dict['eval_expected_pnl'],
+                                            ))
+                                else:  # theta
+                                    for thr in theta_thresholds:
+                                        for cap in max_wing_mults:
+                                            params.append(WParam(
+                                                fixed_param=fixed_param,
+                                                short_dte=sd,
+                                                long_dte=ld,
+                                                short_delta=sdelta,
+                                                long_delta=ldelta,
+                                                n_call=args_dict['n_call'],
+                                                n_put=args_dict['n_put'],
+                                                m_call=args_dict['n_call'],
+                                                m_put=args_dict['n_put'],
+                                                units=args_dict['units'],
+                                                wing_mode='theta',
+                                                credit_buffer=credit_buffers[0],
+                                                theta_threshold=thr,
+                                                max_wing_mult=cap,
+                                                roll_dte=rd,
+                                                roll_on_expiry=args_dict['roll_on_expiry'],
+                                                profit_take_pct=args_dict['profit_take_pct'],
+                                                loss_cut_pct=args_dict['loss_cut_pct'],
+                                                enable_profit_take=args_dict['enable_profit_take'],
+                                                enable_loss_cut=args_dict['enable_loss_cut'],
+                                                enable_dte_roll=args_dict['enable_dte_roll'],
+                                                enable_gamma_scalp=args_dict['enable_gamma_scalp'],
+                                                gamma_scalp_delta_thresh=gth,
+                                                gamma_scalp_stop_delta=args_dict['gamma_scalp_stop_delta'],
+                                                eval_expected_pnl=args_dict['eval_expected_pnl'],
+                                            ))
     return params

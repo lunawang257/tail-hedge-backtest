@@ -152,3 +152,97 @@ def expected_structure_pnl(opt_list, spot, as_of, entry_cash, move_pcts,
         pnls[m] = pnl
         expected += pnl * p
     return expected, pnls, probs
+
+
+DEFAULT_MOVE_RANGES = [
+    (-0.20, -0.10),
+    (-0.10, -0.04),
+    (-0.04, 0.04),
+    (0.04, 0.10),
+    (0.10, 0.20),
+    (-float('inf'), -0.20),
+    (0.20, float('inf')),
+]
+
+
+def _range_label(lo, hi):
+    def fmt(x):
+        if not math.isfinite(x):
+            return '…'
+        return f'{x * 100:.0f}%'
+    return f'{fmt(lo)} to {fmt(hi)}'
+
+
+def expected_pnl_by_ranges(opt_list, spot, as_of, entry_cash,
+                           ranges=None, move_pcts=None,
+                           spots_history=None, horizon_days=5,
+                           use_empirical=False, vol=None):
+    """Expected P/L contribution by price-move ranges.
+
+    For each range [lo, hi), samples discrete move centers, computes
+    PnL(move) * P(move), and sums within the range. Also reports whether
+    the range's representative (mid) PnL is a profit or loss.
+    """
+    if ranges is None:
+        ranges = list(DEFAULT_MOVE_RANGES)
+    if move_pcts is None:
+        # Dense grid covering the ranges
+        move_pcts = [
+            -0.30, -0.25, -0.20, -0.15, -0.12, -0.10, -0.07, -0.04,
+            -0.02, 0.0, 0.02, 0.04, 0.07, 0.10, 0.12, 0.15, 0.20, 0.25, 0.30,
+        ]
+
+    expected, pnls, probs = expected_structure_pnl(
+        opt_list, spot, as_of, entry_cash, move_pcts,
+        spots_history=spots_history, horizon_days=horizon_days,
+        use_empirical=use_empirical, vol=vol)
+
+    rows = []
+    for lo, hi in ranges:
+        contrib = 0.0
+        prob = 0.0
+        # Midpoint for sign / representative PnL
+        if math.isfinite(lo) and math.isfinite(hi):
+            mid = 0.5 * (lo + hi)
+        elif math.isfinite(hi):
+            mid = hi - 0.05
+        elif math.isfinite(lo):
+            mid = lo + 0.05
+        else:
+            mid = 0.0
+        mid_pnl = structure_pnl_at_spot(
+            opt_list, spot * (1.0 + mid), as_of, entry_cash,
+            days_to_horizon=horizon_days)
+        for m, p in probs.items():
+            if lo <= m < hi or (hi == float('inf') and m >= lo):
+                contrib += pnls[m] * p
+                prob += p
+        rows.append({
+            'lo': lo,
+            'hi': hi,
+            'label': _range_label(lo, hi),
+            'prob': prob,
+            'pnl_at_mid': mid_pnl,
+            'expected_contrib': contrib,
+            # Structure P/L sign at range midpoint
+            'pnl_sign': 'profit' if mid_pnl > 0 else ('loss' if mid_pnl < 0 else 'flat'),
+            # Probability-weighted contribution sign (PnL × P)
+            'sign': 'profit' if contrib > 0 else ('loss' if contrib < 0 else 'flat'),
+        })
+    return expected, rows, pnls, probs
+
+
+def format_expected_pnl_ranges(rows, expected_total=None):
+    """Human-readable table of range expected P/L contributions."""
+    lines = []
+    if expected_total is not None:
+        lines.append(f'Total E[PnL]={expected_total:.2f}')
+    lines.append(
+        f'{"range":<16} {"P":>8} {"PnL@mid":>12} {"E[PnL×P]":>12} '
+        f'{"mid":>8} {"E[.]":>8}')
+    for r in rows:
+        lines.append(
+            f'{r["label"]:<16} {r["prob"]*100:7.2f}% '
+            f'{r["pnl_at_mid"]:12.0f} {r["expected_contrib"]:12.0f} '
+            f'{r["pnl_sign"]:>8} {r["sign"]:>8}')
+    return '\n'.join(lines)

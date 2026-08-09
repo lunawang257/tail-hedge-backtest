@@ -159,28 +159,116 @@ def _open_leg(param, date, group, stat, quote, num_contracts, leg_role, debug=Fa
     return cash_flow  # positive = debit paid
 
 
+def _trade_mid(quote, is_long, slip_pct):
+    """Per-share trade price after slippage (long pays ask-ish, short receives bid-ish)."""
+    mid = float(quote.get('mid') or
+                0.5 * (float(quote['BidPrice']) + float(quote['AskPrice'])))
+    if is_long:
+        return mid * (1.0 + slip_pct)
+    return mid * (1.0 - slip_pct)
+
+
+def choose_wing_counts(param, short_call_q, short_put_q, long_call_q, long_put_q):
+    """Pick (m_call, m_put) from wing_mode using quotes for one unit.
+
+    credit: maximize equal-ish wings while long debit stays below short credit
+            by credit_buffer (longs cost slightly less than short premium).
+    theta:  maximize wings while net structure theta stays >= theta_threshold.
+    fixed:  use param.m_call / param.m_put.
+    """
+    n_c, n_p = param.n_call, param.n_put
+    if param.wing_mode == 'fixed':
+        return param.m_call, param.m_put
+
+    slip = param.fixed_param.opt_slippage_percent
+    sc = _trade_mid(short_call_q, is_long=False, slip_pct=slip)
+    sp = _trade_mid(short_put_q, is_long=False, slip_pct=slip)
+    lc = _trade_mid(long_call_q, is_long=True, slip_pct=slip)
+    lp = _trade_mid(long_put_q, is_long=True, slip_pct=slip)
+
+    max_m = max(n_c, n_p) * max(1, param.max_wing_mult)
+    # Prefer at least as many longs as shorts on each side
+    m_c = n_c
+    m_p = n_p
+    best = (m_c, m_p)
+
+    def net_credit(mc, mp):
+        short_credit = (sc * n_c + sp * n_p) * CONTRACT_SCALE
+        long_debit = (lc * mc + lp * mp) * CONTRACT_SCALE
+        return short_credit - long_debit
+
+    def net_theta(mc, mp):
+        # Position theta ($/day): n * θ_pc * 100; shorts have negative n
+        return (
+            (-n_c) * float(short_call_q.get('theta', 0.0))
+            + (-n_p) * float(short_put_q.get('theta', 0.0))
+            + mc * float(long_call_q.get('theta', 0.0))
+            + mp * float(long_put_q.get('theta', 0.0))
+        ) * CONTRACT_SCALE
+
+    if param.wing_mode == 'credit':
+        # Largest M with longs costing slightly less than shorts
+        max_long_cost = (sc * n_c + sp * n_p) * (1.0 - param.credit_buffer) * CONTRACT_SCALE
+        for m in range(max(n_c, n_p), max_m + 1):
+            mc = max(n_c, m)
+            mp = max(n_p, m)
+            long_debit = (lc * mc + lp * mp) * CONTRACT_SCALE
+            if long_debit <= max_long_cost + 1e-9:
+                best = (mc, mp)
+            else:
+                break
+        # If even M=N is a debit, keep M=N (best available hedge floor)
+        return best
+
+    if param.wing_mode == 'theta':
+        for m in range(max(n_c, n_p), max_m + 1):
+            mc = max(n_c, m)
+            mp = max(n_p, m)
+            if net_theta(mc, mp) >= param.theta_threshold - 1e-9:
+                best = (mc, mp)
+            else:
+                break
+        return best
+
+    return param.m_call, param.m_put
+
+
 def open_w_structure(param, date, group, stat, debug=False):
-    """Open short near-ATM + long OTM wings sized by units."""
+    """Open short near-ATM + long OTM wings sized by units / wing_mode."""
     stock_price = float(group['UnderlyingPrice'].iloc[0])
     slip = param.fixed_param.opt_slippage_percent
     u = param.units
 
-    legs = [
-        ('c', param.short_delta, param.short_dte, -param.n_call * u, LEG_SHORT_CALL),
-        ('p', param.short_delta, param.short_dte, -param.n_put * u, LEG_SHORT_PUT),
-        ('c', param.long_delta, param.long_dte, param.m_call * u, LEG_LONG_CALL),
-        ('p', param.long_delta, param.long_dte, param.m_put * u, LEG_LONG_PUT),
-    ]
-
-    quotes = []
-    for opt_type, abs_delta, dte, n, role in legs:
-        q = find_option_by_delta(
-            group, opt_type, date, stock_price, abs_delta, dte,
-            prefer_otm=True, slip_pct=slip, allow_interpolate=True)
+    # Resolve strikes/quotes once, then size wings (shared IV cache for speed)
+    iv_cache = {}
+    short_call_q = find_option_by_delta(
+        group, 'c', date, stock_price, param.short_delta, param.short_dte,
+        prefer_otm=True, slip_pct=slip, allow_interpolate=True, iv_cache=iv_cache)
+    short_put_q = find_option_by_delta(
+        group, 'p', date, stock_price, param.short_delta, param.short_dte,
+        prefer_otm=True, slip_pct=slip, allow_interpolate=True, iv_cache=iv_cache)
+    long_call_q = find_option_by_delta(
+        group, 'c', date, stock_price, param.long_delta, param.long_dte,
+        prefer_otm=True, slip_pct=slip, allow_interpolate=True, iv_cache=iv_cache)
+    long_put_q = find_option_by_delta(
+        group, 'p', date, stock_price, param.long_delta, param.long_dte,
+        prefer_otm=True, slip_pct=slip, allow_interpolate=True, iv_cache=iv_cache)
+    for role, q in [
+        (LEG_SHORT_CALL, short_call_q), (LEG_SHORT_PUT, short_put_q),
+        (LEG_LONG_CALL, long_call_q), (LEG_LONG_PUT, long_put_q),
+    ]:
         if q is None:
-            _log(True, f'{date.date()}: failed to find {role} Δ={abs_delta} dte={dte}')
+            _log(True, f'{date.date()}: failed to find {role}')
             return False
-        quotes.append((q, n, role))
+
+    m_call, m_put = choose_wing_counts(
+        param, short_call_q, short_put_q, long_call_q, long_put_q)
+    quotes = [
+        (short_call_q, -param.n_call * u, LEG_SHORT_CALL),
+        (short_put_q, -param.n_put * u, LEG_SHORT_PUT),
+        (long_call_q, m_call * u, LEG_LONG_CALL),
+        (long_put_q, m_put * u, LEG_LONG_PUT),
+    ]
 
     # Theta check (informational): prefer |θ_long| < |θ_short|
     short_theta = sum(
@@ -203,8 +291,11 @@ def open_w_structure(param, date, group, stat, debug=False):
     stat.structure_entry_value = stat.option_nlv(group)
     stat.structure_open_date = date
     stat.structure_open_spot = stock_price
+    stat.last_wing_m = (m_call, m_put)
     stat.gamma_scalping_active = False
-    _log(debug, f'{date.date()}: opened W#{stat.structure_id} entry_cash={entry_cash:.0f}')
+    _log(debug,
+         f'{date.date()}: opened W#{stat.structure_id} '
+         f'M={m_call}/{m_put} mode={param.wing_mode} entry_cash={entry_cash:.0f}')
     return True
 
 
