@@ -1,12 +1,7 @@
 *~
-env
-__pycache__/
-*.details.csv
-*-details.csv
-*-summary.csv
 *.log
-.pytest_cache/
 data/cache/
+# Stale outputs from the removed Python search scripts
 spx-search-*.csv
 spx-search-*.pid
 spx-search-*.log

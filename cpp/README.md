@@ -1,7 +1,8 @@
 # C++ W Tail-Hedge Backtest
 
-Port of the Python W-strategy engine (`WBacktest.py`, `StrategyW.py`, chain
-interpolation, Merton/GBS pricing, expected P/L).
+Port of the original Python W-strategy engine (chain interpolation, Merton/GBS
+pricing, gamma scalping, expected P/L). The Python implementation has been
+removed from the repo; it lives in git history if ever needed.
 
 ## Build
 
@@ -24,22 +25,22 @@ cmake --build build -j
 ## Parity tests
 
 ```bash
-# Refresh Python reference (from repo root)
-python3 cpp/tools/dump_python_reference.py
-
-# Run C++ checks
 ./build/w_tests \
   ../data/yield-curve-rates-1990-2024.csv \
   ../data/SPY_fixture_small.csv \
   tools/python_reference.json
 ```
 
+`tools/python_reference.json` is a frozen baseline generated from the original
+Python implementation (via `cpp/tools/dump_python_reference.py`, now removed —
+recover both from git history if the fixture ever needs regenerating).
+
 Checks:
 
-1. Merton/GBS value, delta, IV round-trip vs `optlib`
+1. Merton/GBS value, delta, IV round-trip vs `optlib` reference values
 2. Delta strike picker on first fixture day
 3. Full backtest metrics (`annualReturn`, `maxDrawdown`, `finalNLV`, `numRolls`)
-4. Prints Python vs C++ wall time and speedup
+4. Prints recorded Python vs C++ wall time and speedup
 
 ## Parameter search (`w_search`)
 
