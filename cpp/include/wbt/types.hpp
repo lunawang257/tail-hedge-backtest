@@ -73,9 +73,9 @@ struct FixedParam {
   double initial_balance = 1e6;
   double capital_gain_tax = 0.371;
   double stock_comm_per_share = 0.0035;
-  double opt_comm_per_contract = 0.065;
+  double opt_comm_per_contract = 1.7125;
   double stock_slippage = 0;
-  double opt_slippage_percent = 0.01;  // already decimal
+  double opt_slippage_percent = 0.05;  // already decimal (5% of mid)
   std::string symbol = "SPY";
 };
 
@@ -111,6 +111,22 @@ struct WParam {
   };
 };
 
+struct TradeRecord {
+  Date date = 0;
+  std::string action;       // "open" | "close"
+  int structure_id = 0;
+  std::string leg_role;
+  char put_call = 'c';
+  double strike = 0;
+  Date exp_date = 0;
+  int num_contracts = 0;
+  double open_price = 0;    // per-share fill incl. commission allocation
+  double close_price = 0;   // per-share exit fill (0 on opens)
+  double pnl = 0;           // capital gain on close (0 on opens)
+  std::string reason;       // open | dte_roll | expire | profit_take | loss_cut | final
+  double spot = 0;
+};
+
 struct BacktestResult {
   double annual_return = 0;
   double max_drawdown = 0;
@@ -120,6 +136,7 @@ struct BacktestResult {
   double expected_pnl = 0;
   bool ok = true;
   std::string error;
+  std::vector<TradeRecord> trades;  // populated when verbose=true
 };
 
 }  // namespace wbt

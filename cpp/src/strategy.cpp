@@ -6,9 +6,12 @@
 #include <cmath>
 #include <iostream>
 #include <algorithm>
+#include <vector>
 
 namespace wbt {
 namespace {
+
+using TradeLog = std::vector<TradeRecord>;
 
 double trade_mid(const SyntheticQuote& q, bool is_long, double slip) {
   double mid = q.mid > 0 ? q.mid : 0.5 * (q.bid + q.ask);
@@ -19,15 +22,20 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
                                        const SyntheticQuote& sc, const SyntheticQuote& sp,
                                        const SyntheticQuote& lc, const SyntheticQuote& lp) {
   int n_c = param.n_call, n_p = param.n_put;
-  if (param.wing_mode == WingMode::Fixed) return {param.m_call, param.m_put};
+  // Hard rule: long wings must strictly outnumber short body for tail hedge.
+  int min_c = n_c + 1, min_p = n_p + 1;
+  if (param.wing_mode == WingMode::Fixed) {
+    return {std::max(param.m_call, min_c), std::max(param.m_put, min_p)};
+  }
 
   double slip = param.fixed.opt_slippage_percent;
   double scp = trade_mid(sc, false, slip);
   double spp = trade_mid(sp, false, slip);
   double lcp = trade_mid(lc, true, slip);
   double lpp = trade_mid(lp, true, slip);
-  int max_m = std::max(n_c, n_p) * std::max(1, param.max_wing_mult);
-  int best_c = n_c, best_p = n_p;
+  int min_m = std::max(n_c, n_p) + 1;
+  int max_m = std::max(min_m, std::max(n_c, n_p) * std::max(1, param.max_wing_mult));
+  int best_c = std::max(n_c, min_m), best_p = std::max(n_p, min_m);
 
   auto net_theta = [&](int mc, int mp) {
     return ((-n_c) * sc.theta + (-n_p) * sp.theta + mc * lc.theta + mp * lp.theta) * CONTRACT_SCALE;
@@ -35,7 +43,7 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
 
   if (param.wing_mode == WingMode::Credit) {
     double max_long = (scp * n_c + spp * n_p) * (1.0 - param.credit_buffer) * CONTRACT_SCALE;
-    for (int m = std::max(n_c, n_p); m <= max_m; ++m) {
+    for (int m = min_m; m <= max_m; ++m) {
       int mc = std::max(n_c, m), mp = std::max(n_p, m);
       double debit = (lcp * mc + lpp * mp) * CONTRACT_SCALE;
       if (debit <= max_long + 1e-9) { best_c = mc; best_p = mp; }
@@ -44,7 +52,7 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
     return {best_c, best_p};
   }
   // theta
-  for (int m = std::max(n_c, n_p); m <= max_m; ++m) {
+  for (int m = min_m; m <= max_m; ++m) {
     int mc = std::max(n_c, m), mp = std::max(n_p, m);
     if (net_theta(mc, mp) >= param.theta_threshold - 1e-9) { best_c = mc; best_p = mp; }
     else break;
@@ -53,7 +61,8 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
 }
 
 double open_leg(const WParam& param, Date date, double spot, PositionsAndStats& stat,
-                const SyntheticQuote& quote, int num_contracts, const char* role) {
+                const SyntheticQuote& quote, int num_contracts, const char* role,
+                TradeLog* log) {
   if (num_contracts == 0) return 0;
   bool is_buy = num_contracts > 0;
   double mid = quote.mid > 0 ? quote.mid : 0.5 * (quote.bid + quote.ask);
@@ -83,11 +92,29 @@ double open_leg(const WParam& param, Date date, double spot, PositionsAndStats& 
   stat.opt_list.push_back(pos);
   stat.cash -= cash_flow;
   stat.total_commission += opt_comm * n;
+
+  if (log) {
+    TradeRecord tr;
+    tr.date = date;
+    tr.action = "open";
+    tr.structure_id = pos.structure_id;
+    tr.leg_role = role;
+    tr.put_call = opt_type_char(pos.opt_type);
+    tr.strike = pos.strike;
+    tr.exp_date = pos.exp_date;
+    tr.num_contracts = pos.num_contracts;
+    tr.open_price = pos.open_price;
+    tr.close_price = 0;
+    tr.pnl = 0;
+    tr.reason = "open";
+    tr.spot = spot;
+    log->push_back(std::move(tr));
+  }
   return cash_flow;
 }
 
 bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
-                      PositionsAndStats& stat) {
+                      PositionsAndStats& stat, TradeLog* log) {
   double spot = ds.spot(date);
   double slip = param.fixed.opt_slippage_percent;
   int u = param.units;
@@ -106,10 +133,10 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
   auto [m_call, m_put] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
   ++stat.structure_id;
   double entry = 0;
-  entry += open_leg(param, date, spot, stat, *sc, -param.n_call * u, LEG_SHORT_CALL);
-  entry += open_leg(param, date, spot, stat, *sp, -param.n_put * u, LEG_SHORT_PUT);
-  entry += open_leg(param, date, spot, stat, *lc, m_call * u, LEG_LONG_CALL);
-  entry += open_leg(param, date, spot, stat, *lp, m_put * u, LEG_LONG_PUT);
+  entry += open_leg(param, date, spot, stat, *sc, -param.n_call * u, LEG_SHORT_CALL, log);
+  entry += open_leg(param, date, spot, stat, *sp, -param.n_put * u, LEG_SHORT_PUT, log);
+  entry += open_leg(param, date, spot, stat, *lc, m_call * u, LEG_LONG_CALL, log);
+  entry += open_leg(param, date, spot, stat, *lp, m_put * u, LEG_LONG_PUT, log);
   stat.structure_entry_cash = entry;
   stat.structure_entry_value = stat.option_nlv(date, spot);
   stat.structure_open_date = date;
@@ -121,7 +148,7 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
 }
 
 double close_one_option(const WParam& param, Date date, double spot, PositionsAndStats& stat,
-                        OptPosition& opt, const char* /*reason*/) {
+                        OptPosition& opt, const char* reason, TradeLog* log) {
   double mid = stat.mark_option(opt, date, spot);
   bool is_long = opt.num_contracts > 0;
   double slip = param.fixed.opt_slippage_percent;
@@ -129,7 +156,27 @@ double close_one_option(const WParam& param, Date date, double spot, PositionsAn
   double opt_comm = param.fixed.opt_comm_per_contract;
   double cash_change = trade_px * opt.num_contracts * CONTRACT_SCALE
                        - opt_comm * std::abs(opt.num_contracts);
+  // Close fill incl. commission, signed like open_price for P/L consistency.
+  double close_price = trade_px - (opt_comm / CONTRACT_SCALE) *
+                       (is_long ? 1.0 : -1.0);
   double capital_gain = cash_change - opt.get_cost_basis();
+  if (log) {
+    TradeRecord tr;
+    tr.date = date;
+    tr.action = "close";
+    tr.structure_id = opt.structure_id;
+    tr.leg_role = opt.leg_role;
+    tr.put_call = opt_type_char(opt.opt_type);
+    tr.strike = opt.strike;
+    tr.exp_date = opt.exp_date;
+    tr.num_contracts = opt.num_contracts;
+    tr.open_price = opt.open_price;
+    tr.close_price = close_price;
+    tr.pnl = capital_gain;
+    tr.reason = reason ? reason : "";
+    tr.spot = spot;
+    log->push_back(std::move(tr));
+  }
   stat.cash += cash_change;
   stat.total_commission += opt_comm * std::abs(opt.num_contracts);
   stat.total_capital_gain += capital_gain;
@@ -140,8 +187,8 @@ double close_one_option(const WParam& param, Date date, double spot, PositionsAn
 }
 
 void close_all_options(const WParam& param, Date date, double spot, PositionsAndStats& stat,
-                       const char* reason) {
-  for (auto& opt : stat.opt_list) close_one_option(param, date, spot, stat, opt, reason);
+                       const char* reason, TradeLog* log) {
+  for (auto& opt : stat.opt_list) close_one_option(param, date, spot, stat, opt, reason, log);
   stat.opt_list.clear();
 }
 
@@ -241,7 +288,7 @@ void update_greeks(Date date, double spot, PositionsAndStats& stat) {
 
 }  // namespace
 
-BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool debug) {
+BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool verbose) {
   BacktestResult result;
   if (ds.dates.empty()) {
     result.ok = false;
@@ -251,6 +298,7 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool de
   PositionsAndStats stat;
   stat.all_data = &ds;
   stat.cash = param.fixed.initial_balance;
+  TradeLog* log = verbose ? &result.trades : nullptr;
 
   std::vector<double> spots;
   Date start = ds.dates.front();
@@ -279,14 +327,14 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool de
     if (!stat.opt_list.empty()) {
       auto [do_roll, reason] = should_roll(param, date, spot, stat);
       if (do_roll) {
-        close_all_options(param, date, spot, stat, reason);
+        close_all_options(param, date, spot, stat, reason, log);
         close_all_stock(param, date, spot, stat);
         ++stat.num_rolls;
-        open_w_structure(param, date, ds, stat);
+        open_w_structure(param, date, ds, stat, log);
       }
       // gamma scalp omitted when disabled (default for parity tests)
     } else {
-      open_w_structure(param, date, ds, stat);
+      open_w_structure(param, date, ds, stat, log);
     }
 
     if (param.eval_expected_pnl && i % 5 == 0 && !stat.opt_list.empty()) {
@@ -306,7 +354,7 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool de
   Date last = ds.dates.back();
   double last_spot = ds.spot(last);
   if (!stat.opt_list.empty())
-    close_all_options(param, last, last_spot, stat, "final");
+    close_all_options(param, last, last_spot, stat, "final", log);
   if (std::abs(stat.total_shares()) > 1e-9)
     close_all_stock(param, last, last_spot, stat);
   year_end_tax(param, stat);
@@ -324,9 +372,10 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool de
   result.num_rolls = stat.num_rolls;
   result.num_gamma_hedges = stat.num_gamma_hedges;
   result.expected_pnl = stat.last_expected_pnl;
-  if (debug) {
+  if (verbose) {
     std::cerr << "C++ backtest annual=" << annual << "% dd=" << stat.max_drawdown
-              << "% finalNLV=" << final_nlv << " rolls=" << stat.num_rolls << "\n";
+              << "% finalNLV=" << final_nlv << " rolls=" << stat.num_rolls
+              << " trades=" << result.trades.size() << "\n";
   }
   return result;
 }

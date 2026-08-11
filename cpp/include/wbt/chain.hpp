@@ -27,6 +27,6 @@ std::optional<SyntheticQuote> synthetic_option_quote(
 std::optional<SyntheticQuote> find_option_by_delta(
     const OptionsDataset& ds, OptType type, Date as_of, double spot,
     double target_abs_delta, int target_dte, bool prefer_otm = true,
-    double slip_pct = 0.01, bool allow_interpolate = true, IvCache* cache = nullptr);
+    double slip_pct = 0.05, bool allow_interpolate = true, IvCache* cache = nullptr);
 
 }  // namespace wbt

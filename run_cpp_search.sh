@@ -38,6 +38,9 @@ mkdir -p "$ROOT/data/cache"
 echo "Logging to $LOG"
 echo "Window $START → $END  every_n=$EVERY_N  workers=$WORKERS  units=$UNITS"
 
+declare -a RUNTIMES=()
+TOTAL_T0=$(date +%s)
+
 for job in "${JOBS[@]}"; do
   IFS='|' read -r SYM INPUT CACHE OUT <<< "$job"
   if [[ ! -f "$INPUT" ]]; then
@@ -47,6 +50,7 @@ for job in "${JOBS[@]}"; do
   echo ""
   echo "===== $SYM =====" | tee -a "$LOG"
   echo "input=$INPUT" | tee -a "$LOG"
+  SYM_T0=$(date +%s)
   "$W_SEARCH" --symbol "$SYM" \
     -i "$INPUT" -y "$YIELD" \
     --cache "$CACHE" \
@@ -54,12 +58,20 @@ for job in "${JOBS[@]}"; do
     --every-n "$EVERY_N" --atm-band "$ATM_BAND" \
     --units "$UNITS" --workers "$WORKERS" \
     --out "$OUT" 2>&1 | tee -a "$LOG"
+  SYM_T1=$(date +%s)
+  SYM_SEC=$((SYM_T1 - SYM_T0))
+  RUNTIMES+=("$SYM|$SYM_SEC|$OUT")
   echo "Wrote $OUT" | tee -a "$LOG"
+  echo "Runtime $SYM: ${SYM_SEC}s ($(awk -v s="$SYM_SEC" 'BEGIN{printf "%.1f min", s/60}'))" | tee -a "$LOG"
 done
+
+TOTAL_T1=$(date +%s)
+TOTAL_SEC=$((TOTAL_T1 - TOTAL_T0))
 
 echo ""
 echo "=== ALL DONE ===" | tee -a "$LOG"
-for job in "${JOBS[@]}"; do
-  IFS='|' read -r SYM INPUT CACHE OUT <<< "$job"
-  echo "  $SYM → $OUT"
+for entry in "${RUNTIMES[@]}"; do
+  IFS='|' read -r SYM SEC OUT <<< "$entry"
+  echo "  $SYM → $OUT  (${SEC}s, $(awk -v s="$SEC" 'BEGIN{printf "%.1f min", s/60}'))" | tee -a "$LOG"
 done
+echo "  total runtime: ${TOTAL_SEC}s ($(awk -v s="$TOTAL_SEC" 'BEGIN{printf "%.1f min", s/60}'))" | tee -a "$LOG"

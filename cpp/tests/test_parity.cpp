@@ -85,6 +85,9 @@ int main(int argc, char** argv) {
   auto ds = load_options_csv(fixture);
   WParam param;
   param.fixed.initial_balance = json_num_after(ref, "balance");
+  // Pin legacy costs so parity stays aligned with python_reference.json.
+  param.fixed.opt_comm_per_contract = 0.065;
+  param.fixed.opt_slippage_percent = 0.01;
   param.short_dte = 30;
   param.long_dte = 60;
   param.short_delta = 0.40;
@@ -103,7 +106,8 @@ int main(int argc, char** argv) {
   double spot = ds.spot(as_of);
   check("spot", spot, json_num_after(ref, "spot"), 1e-4);
 
-  auto sc = find_option_by_delta(ds, OptType::Call, as_of, spot, 0.40, 30);
+  auto sc = find_option_by_delta(ds, OptType::Call, as_of, spot, 0.40, 30,
+                                 true, 0.01);
   if (!sc) { std::cout << "FAIL short_call missing\n"; ++g_fail; }
   else {
     auto pos = ref.find("\"short_call\"");

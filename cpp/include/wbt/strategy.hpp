@@ -5,6 +5,8 @@
 
 namespace wbt {
 
-BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool debug = false);
+// When verbose=true, fills result.trades with every option open/close.
+BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param,
+                          bool verbose = false);
 
 }  // namespace wbt

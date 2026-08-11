@@ -3,6 +3,8 @@
 #include "wbt/strategy.hpp"
 #include "wbt/gbs.hpp"
 #include <iostream>
+#include <fstream>
+#include <iomanip>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
@@ -12,20 +14,71 @@ using namespace wbt;
 static void usage(const char* argv0) {
   std::cerr <<
     "Usage: " << argv0 << " [options]\n"
-    "  -i <options.csv>   Options chain CSV\n"
-    "  -y <yield.csv>     Yield curve CSV\n"
-    "  --short-dte N\n"
-    "  --long-dte N\n"
-    "  --short-delta X\n"
-    "  --long-delta X\n"
-    "  --units N\n"
-    "  --balance X\n"
-    "  --start-date YYYY-MM-DD\n"
-    "  --end-date YYYY-MM-DD\n"
-    "  --trade-every-n-days N\n"
-    "  --no-gamma-scalp\n"
+    "\n"
+    "Inputs:\n"
+    "  -i <options.csv>         Options chain CSV (.csv or .csv.gz)\n"
+    "  -y <yield.csv>           Yield curve CSV\n"
+    "  --start-date YYYY-MM-DD  Inclusive start (default: first day in file)\n"
+    "  --end-date YYYY-MM-DD    Inclusive end (default: last day in file)\n"
+    "  --trade-every-n-days N   Keep every Nth session (default 1)\n"
+    "\n"
+    "Structure:\n"
+    "  --short-dte N            Target DTE for short (body) legs (default 30)\n"
+    "  --long-dte N             Target DTE for long (wing) legs (default 60)\n"
+    "  --short-delta X          |delta| target for short legs (default 0.40)\n"
+    "  --long-delta X           |delta| target for long wings (default 0.10)\n"
+    "  --units N                Structure multiplier (default 1)\n"
+    "  --m-call N               Fixed-mode long-call wing count (default 2)\n"
+    "  --m-put N                Fixed-mode long-put wing count (default 2)\n"
+    "  --balance X              Starting cash (default 1e6)\n"
+    "  --commission X           Option commission $/contract (default 1.7125)\n"
+    "  --slippage-pct X         Option slippage as percent of mid;\n"
+    "                           e.g. 5 means 5% (default 5)\n"
+    "\n"
+    "Exit / roll:\n"
+    "  --roll-dte N             Roll when short DTE <= N (default 0)\n"
+    "  --dte-roll / --no-dte-roll\n"
+    "  --roll-on-expiry / --no-roll-on-expiry\n"
+    "  --profit-take-pct X      Take profit at +X of |entry cash| (default 0.50)\n"
+    "  --profit-take / --no-profit-take\n"
+    "  --loss-cut-pct X         Cut loss at -X of |entry cash| (default 1.00)\n"
+    "  --loss-cut / --no-loss-cut\n"
+    "\n"
+    "Other:\n"
+    "  --gamma-scalp / --no-gamma-scalp\n"
     "  --no-expected-pnl\n"
-    "  --bench N           Repeat backtest N times for timing\n";
+    "  --verbose                Record every option open/close to CSV\n"
+    "  --verbose-out <path>     Verbose CSV path (implies --verbose;\n"
+    "                           default transactions.csv)\n"
+    "  --bench N                Repeat backtest N times for timing\n"
+    "  -h, --help\n";
+}
+
+static void write_trades_csv(const std::string& path,
+                             const std::vector<TradeRecord>& trades) {
+  std::ofstream out(path);
+  if (!out) {
+    std::cerr << "Failed to write verbose CSV: " << path << "\n";
+    return;
+  }
+  out << "date,action,structureId,leg,type,strike,expiry,contracts,"
+         "openPrice,closePrice,pnl,reason,spot\n";
+  out << std::fixed << std::setprecision(6);
+  for (const auto& t : trades) {
+    out << format_date(t.date) << ','
+        << t.action << ','
+        << t.structure_id << ','
+        << t.leg_role << ','
+        << t.put_call << ','
+        << t.strike << ','
+        << format_date(t.exp_date) << ','
+        << t.num_contracts << ','
+        << t.open_price << ','
+        << t.close_price << ','
+        << t.pnl << ','
+        << t.reason << ','
+        << t.spot << '\n';
+  }
 }
 
 int main(int argc, char** argv) {
@@ -37,6 +90,8 @@ int main(int argc, char** argv) {
   Date start = 0, end = 0;
   int every_n = 1;
   int bench = 1;
+  bool verbose = false;
+  std::string verbose_out = "transactions.csv";
 
   for (int i = 1; i < argc; ++i) {
     auto eq = [&](const char* s) { return std::strcmp(argv[i], s) == 0; };
@@ -52,15 +107,40 @@ int main(int argc, char** argv) {
     else if (eq("--long-delta")) param.long_delta = std::atof(need());
     else if (eq("--units")) param.units = std::atoi(need());
     else if (eq("--balance")) param.fixed.initial_balance = std::atof(need());
+    else if (eq("--commission"))
+      param.fixed.opt_comm_per_contract = std::atof(need());
+    else if (eq("--slippage-pct"))
+      param.fixed.opt_slippage_percent = std::atof(need()) / 100.0;
     else if (eq("--m-call")) param.m_call = std::atoi(need());
     else if (eq("--m-put")) param.m_put = std::atoi(need());
     else if (eq("--roll-dte")) param.roll_dte = std::atoi(need());
+    else if (eq("--dte-roll")) param.enable_dte_roll = true;
+    else if (eq("--no-dte-roll")) param.enable_dte_roll = false;
+    else if (eq("--roll-on-expiry")) param.roll_on_expiry = true;
+    else if (eq("--no-roll-on-expiry")) param.roll_on_expiry = false;
+    else if (eq("--profit-take-pct")) {
+      param.profit_take_pct = std::atof(need());
+      param.enable_profit_take = true;
+    }
+    else if (eq("--profit-take")) param.enable_profit_take = true;
+    else if (eq("--no-profit-take")) param.enable_profit_take = false;
+    else if (eq("--loss-cut-pct")) {
+      param.loss_cut_pct = std::atof(need());
+      param.enable_loss_cut = true;
+    }
+    else if (eq("--loss-cut")) param.enable_loss_cut = true;
+    else if (eq("--no-loss-cut")) param.enable_loss_cut = false;
     else if (eq("--start-date")) start = parse_date(need());
     else if (eq("--end-date")) end = parse_date(need());
     else if (eq("--trade-every-n-days")) every_n = std::atoi(need());
     else if (eq("--no-gamma-scalp")) param.enable_gamma_scalp = false;
     else if (eq("--gamma-scalp")) param.enable_gamma_scalp = true;
     else if (eq("--no-expected-pnl")) param.eval_expected_pnl = false;
+    else if (eq("--verbose") || eq("-v")) verbose = true;
+    else if (eq("--verbose-out")) {
+      verbose_out = need();
+      verbose = true;
+    }
     else if (eq("--bench")) bench = std::atoi(need());
     else if (eq("-h") || eq("--help")) { usage(argv[0]); return 0; }
     else {
@@ -76,12 +156,20 @@ int main(int argc, char** argv) {
   load_yield_data(yield);
   auto ds = load_options_csv(input, start, end, every_n);
 
+  // Verbose trade log is only needed on the last (or sole) run.
   BacktestResult last;
   auto t0 = std::chrono::steady_clock::now();
-  for (int i = 0; i < bench; ++i)
-    last = w_strategy(ds, param, false);
+  for (int i = 0; i < bench; ++i) {
+    bool record = verbose && (i == bench - 1);
+    last = w_strategy(ds, param, record);
+  }
   auto t1 = std::chrono::steady_clock::now();
   double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+  if (verbose) {
+    write_trades_csv(verbose_out, last.trades);
+    std::cerr << "Wrote " << last.trades.size() << " trades to " << verbose_out << "\n";
+  }
 
   std::cout << "annualReturn=" << last.annual_return
             << " maxDrawdown=" << last.max_drawdown
