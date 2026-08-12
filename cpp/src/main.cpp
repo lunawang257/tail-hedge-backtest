@@ -122,8 +122,8 @@ int main(int argc, char** argv) {
       param.fixed.opt_comm_per_contract = std::atof(need());
     else if (eq("--slippage-pct"))
       param.fixed.opt_slippage_percent = std::atof(need()) / 100.0;
-    else if (eq("--m-call")) param.m_call = std::atoi(need());
-    else if (eq("--m-put")) param.m_put = std::atoi(need());
+    else if (eq("--m-call")) param.m_call = std::atof(need());
+    else if (eq("--m-put")) param.m_put = std::atof(need());
     else if (eq("--roll-dte")) param.roll_dte = std::atoi(need());
     else if (eq("--dte-roll")) param.enable_dte_roll = true;
     else if (eq("--no-dte-roll")) param.enable_dte_roll = false;

@@ -23,11 +23,7 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
                                        const SyntheticQuote& lc, const SyntheticQuote& lp) {
   int n_c = param.n_call, n_p = param.n_put;
   // Hard rule: long wings must strictly outnumber short body for tail hedge.
-  int min_c = n_c + 1, min_p = n_p + 1;
-  if (param.wing_mode == WingMode::Fixed) {
-    return {std::max(param.m_call, min_c), std::max(param.m_put, min_p)};
-  }
-
+  // Fixed mode sizes totals via long/short ratio in open_w_structure (supports floats).
   double slip = param.fixed.opt_slippage_percent;
   double scp = trade_mid(sc, false, slip);
   double spp = trade_mid(sp, false, slip);
@@ -130,19 +126,33 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
                                  param.long_dte, true, slip, true, &iv_cache);
   if (!sc || !sp || !lc || !lp) return false;
 
-  auto [m_call, m_put] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
+  int short_c = param.n_call * u;
+  int short_p = param.n_put * u;
+  int long_c = 0, long_p = 0;
+  if (param.wing_mode == WingMode::Fixed) {
+    // m_call / m_put are long/short ratios (e.g. 1.3 with units=10 → 13 longs).
+    long_c = static_cast<int>(std::llround(static_cast<double>(short_c) * param.m_call));
+    long_p = static_cast<int>(std::llround(static_cast<double>(short_p) * param.m_put));
+    long_c = std::max(long_c, short_c + 1);
+    long_p = std::max(long_p, short_p + 1);
+  } else {
+    auto [mc, mp] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
+    long_c = mc * u;
+    long_p = mp * u;
+  }
   ++stat.structure_id;
   double entry = 0;
-  entry += open_leg(param, date, spot, stat, *sc, -param.n_call * u, LEG_SHORT_CALL, log);
-  entry += open_leg(param, date, spot, stat, *sp, -param.n_put * u, LEG_SHORT_PUT, log);
-  entry += open_leg(param, date, spot, stat, *lc, m_call * u, LEG_LONG_CALL, log);
-  entry += open_leg(param, date, spot, stat, *lp, m_put * u, LEG_LONG_PUT, log);
+  entry += open_leg(param, date, spot, stat, *sc, -short_c, LEG_SHORT_CALL, log);
+  entry += open_leg(param, date, spot, stat, *sp, -short_p, LEG_SHORT_PUT, log);
+  entry += open_leg(param, date, spot, stat, *lc, long_c, LEG_LONG_CALL, log);
+  entry += open_leg(param, date, spot, stat, *lp, long_p, LEG_LONG_PUT, log);
   stat.structure_entry_cash = entry;
   stat.structure_entry_value = stat.option_nlv(date, spot);
   stat.structure_open_date = date;
   stat.structure_open_spot = spot;
-  stat.last_wing_m_call = m_call;
-  stat.last_wing_m_put = m_put;
+  // Store opened wing contract counts for diagnostics.
+  stat.last_wing_m_call = long_c;
+  stat.last_wing_m_put = long_p;
   stat.gamma_scalping_active = false;
   return true;
 }

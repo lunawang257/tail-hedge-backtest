@@ -88,7 +88,9 @@ struct WParam {
   double short_delta = 0.40;
   double long_delta = 0.10;
   int n_call = 1, n_put = 1;
-  int m_call = 2, m_put = 2;
+  // Fixed wing mode: long/short contract ratio (e.g. 1.3 → 13 longs per 10 shorts).
+  // Credit/theta: unused (wing size chosen at runtime).
+  double m_call = 2, m_put = 2;
   int units = 1;
   WingMode wing_mode = WingMode::Fixed;
   double credit_buffer = 0.02;

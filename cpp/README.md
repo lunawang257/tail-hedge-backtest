@@ -47,8 +47,8 @@ The strategy sells a short-dated call+put body and buys longer-dated wings
 | `--short-delta X` | Absolute delta target for short call/put selection (e.g. `0.40` ≈ 40Δ). Default `0.40`. |
 | `--long-delta X` | Absolute delta target for long wing selection (further OTM). Default `0.10`. |
 | `--units N` | Multiplier applied to all four legs (scales size). Default `1`. |
-| `--m-call N` | In fixed wing mode: number of long-call wing contracts per unit body. Default `2`. |
-| `--m-put N` | In fixed wing mode: number of long-put wing contracts per unit body. Default `2`. |
+| `--m-call X` | In fixed wing mode: long/short **ratio** for calls (e.g. `1.3` → 13 longs per 10 shorts). Default `2`. |
+| `--m-put X` | In fixed wing mode: long/short **ratio** for puts. Default `2`. |
 | `--balance X` | Starting cash / NLV. Default `1e6` (`100000` in the example above). |
 | `--commission X` | Option commission in $/contract. Default `1.7125`. |
 | `--slippage-pct X` | Option slippage as a **percent of mid** (e.g. `5` = 5%). Default `5`. |
@@ -180,27 +180,27 @@ Defined in `cpp/src/w_search.cpp` (`GridSpec` / `build_grid`). Defaults:
 
 | Dimension | Values | Meaning |
 |-----------|--------|---------|
-| short DTE | `{5,7,14,30,45}` | Body tenor |
+| short DTE | `{7,14,30,45}` | Body tenor |
 | long DTE | `{30,60,90}` (must be ≥ short) | Wing tenor |
 | short Δ | `{0.35,0.45}` | Body delta target |
 | long Δ | `{0.08,0.12}` (must be &lt; short Δ) | Wing delta target |
-| wing mode | `fixed(M=2\|3)`, `credit`, `theta` | How wing contract counts are chosen |
-| `rollDTE` | `{0,3,7}` | DTE roll threshold |
-| `profitTake` | `{off,0.25,0.50,0.75}` | Profit-take fraction or disabled |
-| `lossCut` | `{off,0.50,1.00}` | Loss-cut fraction or disabled |
+| wing mode | `fixed(ratio=2)`, `credit`, `theta` | How wing contract counts are chosen |
+| `rollDTE` | `{0}` | DTE roll threshold |
+| `profitTake` | `{off,0.75}` | Profit-take fraction or disabled |
+| `lossCut` | `{off}` | Loss-cut disabled in default grid |
 
-That’s **8064** configs (DTE roll + expiry always on in the grid). Score =
+That’s **264** configs (DTE roll + expiry always on in the grid). Score =
 `annualReturn - 0.5 × maxDrawdown`.
 
-Hard rule: long wing contracts must always exceed short body contracts
-(`m > n`, with search body `n=1` so `M≥2`). `fixed:1` is rejected; credit /
-theta size from at least `n+1` upward.
+Hard rule: long wing contracts must always exceed short body contracts.
+For fixed mode, `long_short_ratio > 1` (e.g. `fixed:1.3` → 13 longs per 10
+shorts). `fixed:1` is rejected; credit / theta size from at least `n+1` upward.
 
 Shrink or pin any dimension without rebuilding (comma lists; one value = fixed):
 
 ```bash
 ./build/w_search ... --short-dtes 30 --long-dtes 60,90 \
-  --wings fixed:2 --roll-dtes 0 --profit-takes 0.50 --loss-cuts off
+  --wings fixed:2 --roll-dtes 0 --profit-takes 0.75 --loss-cuts off
 ```
 
 | Flag | Example |
@@ -208,14 +208,15 @@ Shrink or pin any dimension without rebuilding (comma lists; one value = fixed):
 | `--short-dtes` | `30` or `5,14,30` |
 | `--long-dtes` | `60,90` |
 | `--short-deltas` / `--long-deltas` | `0.45` / `0.08,0.12` |
-| `--wings` | `fixed:2,fixed:3,credit,theta` |
-| `--roll-dtes` | `0,7` |
-| `--profit-takes` / `--loss-cuts` | `off,0.50` (use `off` to disable) |
+| `--wings` | `fixed:2,fixed:1.3,credit,theta` |
+| `--roll-dtes` | `0` |
+| `--profit-takes` / `--loss-cuts` | `off,0.75` (use `off` to disable) |
 
 Wing modes:
 
-- **fixed(M)**: buy `M` wing contracts per body unit (`m_call = m_put = M`,
-  `M ≥ 2`).
+- **fixed(ratio)**: buy `round(short_contracts × ratio)` wing contracts
+  (`m_call` / `m_put` are long/short ratios, e.g. `1.3` → 13 longs per 10
+  shorts; ratio must be `> 1`).
 - **credit**: increase wing size from `n+1` up to `maxWingMult` while keeping
   long debit ≤ short credit × `(1 - creditBuffer)` (never below `n+1`).
 - **theta**: increase wing size from `n+1` while net structure theta ≥

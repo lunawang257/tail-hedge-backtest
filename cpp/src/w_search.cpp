@@ -29,7 +29,7 @@ struct SearchConfig {
   double short_delta = 0;
   double long_delta = 0;
   WingMode wing_mode = WingMode::Fixed;
-  int m_call = 2, m_put = 2;
+  double m_call = 2, m_put = 2;  // Fixed: long/short ratio
   double credit_buffer = 0.02;
   double theta_threshold = 0.0;
   int max_wing_mult = 4;
@@ -100,36 +100,40 @@ WParam to_param(const SearchConfig& c, double balance, const std::string& symbol
 //   --long-dtes 60,90
 //   --short-deltas 0.45
 //   --long-deltas 0.08,0.12
-//   --wings fixed:2,credit
-//   --roll-dtes 0,7
-//   --profit-takes off,0.50
-//   --loss-cuts off,1.00
+//   --wings fixed:2,fixed:1.3,credit
+//   --roll-dtes 0
+//   --profit-takes off,0.75
+//   --loss-cuts off
 // ---------------------------------------------------------------------------
 
 struct WingSpec {
   WingMode mode = WingMode::Fixed;
-  int m = 2;                 // used when mode == Fixed (m_call = m_put = m)
+  // Fixed: long/short contract ratio (e.g. 1.3 → 13 longs per 10 shorts).
+  // Must be > 1. Credit/theta ignore this (size chosen at runtime).
+  double long_short_ratio = 2.0;
   double credit_buffer = 0.02;
   double theta_threshold = 0.0;
   int max_wing_mult = 4;
 };
 
 struct GridSpec {
-  std::vector<int> short_dtes = {5, 7, 14, 30, 45};
+  std::vector<int> short_dtes = {7, 14, 30, 45};
   std::vector<int> long_dtes = {30, 60, 90};
   std::vector<double> short_deltas = {0.35, 0.45};
   std::vector<double> long_deltas = {0.08, 0.12};
-  // fixed(M>=2), credit, theta — long wings must outnumber short body (n=1).
+  // fixed(ratio>1), credit, theta — long wings must outnumber short body.
   std::vector<WingSpec> wings = {
-    {WingMode::Fixed, 2, 0.02, 0.0, 4},
-    {WingMode::Fixed, 3, 0.02, 0.0, 4},
-    {WingMode::Credit, 2, 0.02, 0.0, 4},
-    {WingMode::Theta, 2, 0.02, 0.0, 4},
+    {WingMode::Fixed, 1.8, 0.02, 0.0, 4},
+    {WingMode::Fixed, 2.0, 0.02, 0.0, 4},
+    {WingMode::Fixed, 2.2, 0.02, 0.0, 4},
+    {WingMode::Credit, 2.0, 0.02, 0.0, 4},
+    {WingMode::Theta, 2.0, 0.02, 0.0, 4},
+    {WingMode::Theta, 2.0, 0.02, 0.1, 4},
   };
   // -1 in profit_takes / loss_cuts means that exit path is disabled
-  std::vector<int> roll_dtes = {0, 3, 7};
-  std::vector<double> profit_takes = {-1.0, 0.25, 0.50, 0.75};
-  std::vector<double> loss_cuts = {-1.0, 0.50, 1.00};
+  std::vector<int> roll_dtes = {0};
+  std::vector<double> profit_takes = {-1.0, 3, 5};
+  std::vector<double> loss_cuts = {-1.0};
 };
 
 std::vector<std::string> split_csv(const std::string& s) {
@@ -168,24 +172,26 @@ std::vector<WingSpec> parse_wings(const std::string& s) {
     WingSpec w;
     auto colon = t.find(':');
     std::string mode = colon == std::string::npos ? t : t.substr(0, colon);
-    int m = colon == std::string::npos ? 2 : std::atoi(t.substr(colon + 1).c_str());
+    double ratio = colon == std::string::npos
+                       ? 2.0
+                       : std::atof(t.substr(colon + 1).c_str());
     if (mode == "fixed") {
       w.mode = WingMode::Fixed;
-      w.m = m > 0 ? m : 2;
-      if (w.m <= 1) {
+      w.long_short_ratio = ratio > 0 ? ratio : 2.0;
+      if (w.long_short_ratio <= 1.0) {
         throw std::runtime_error(
-            "fixed wing M must be > short body (got fixed:" +
-            std::to_string(w.m) + "; need M>=2)");
+            "fixed long_short_ratio must be > 1 (got fixed:" +
+            std::to_string(w.long_short_ratio) + ")");
       }
     } else if (mode == "credit") {
       w.mode = WingMode::Credit;
-      w.m = 2;  // floor marker; actual size chosen at runtime (>= 2)
+      w.long_short_ratio = 2.0;  // unused; size chosen at runtime
     } else if (mode == "theta") {
       w.mode = WingMode::Theta;
-      w.m = 2;  // floor marker; actual size chosen at runtime (>= 2)
+      w.long_short_ratio = 2.0;  // unused; size chosen at runtime
     } else {
       throw std::runtime_error("bad --wings token '" + t +
-                               "' (use fixed[:M], credit, theta)");
+                               "' (use fixed[:ratio], credit, theta)");
     }
     out.push_back(w);
   }
@@ -201,9 +207,9 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units) {
         for (double ldel : g.long_deltas) {
           if (!(0 < ldel && ldel < sdel && sdel < 1)) continue;
           for (auto& w : g.wings) {
-            // Hard rule: long > short. Search body is n_call=n_put=1, so
-            // fixed M must be >= 2; credit/theta enforce the floor at runtime.
-            if (w.mode == WingMode::Fixed && w.m <= 1) continue;
+            // Hard rule: long > short. Fixed ratio must be > 1;
+            // credit/theta enforce the floor at runtime.
+            if (w.mode == WingMode::Fixed && w.long_short_ratio <= 1.0) continue;
             if (w.max_wing_mult < 2 &&
                 (w.mode == WingMode::Credit || w.mode == WingMode::Theta)) {
               continue;
@@ -217,7 +223,7 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units) {
                   c.short_delta = sdel;
                   c.long_delta = ldel;
                   c.wing_mode = w.mode;
-                  c.m_call = w.mode == WingMode::Fixed ? w.m : std::max(w.m, 2);
+                  c.m_call = w.mode == WingMode::Fixed ? w.long_short_ratio : 2.0;
                   c.m_put = c.m_call;
                   c.credit_buffer = w.credit_buffer;
                   c.theta_threshold = w.theta_threshold;
@@ -286,7 +292,7 @@ void print_grid(const GridSpec& g, size_t n) {
   for (size_t i = 0; i < g.wings.size(); ++i) {
     if (i) std::cerr << ',';
     auto& w = g.wings[i];
-    if (w.mode == WingMode::Fixed) std::cerr << "fixed:" << w.m;
+    if (w.mode == WingMode::Fixed) std::cerr << "fixed:" << w.long_short_ratio;
     else std::cerr << wing_name(w.mode);
   }
   std::cerr << "}\n"
@@ -359,14 +365,14 @@ void usage(const char* argv0) {
     << "  --limit N              Debug: only first N configs\n"
     << "\n"
     << "Pin / shrink the search grid (comma lists; one value = fixed):\n"
-    << "  --short-dtes 5,7,14,30,45\n"
+    << "  --short-dtes 7,14,30,45\n"
     << "  --long-dtes 30,60,90\n"
     << "  --short-deltas 0.35,0.45\n"
     << "  --long-deltas 0.08,0.12\n"
-    << "  --wings fixed:2,fixed:3,credit,theta\n"
-    << "  --roll-dtes 0,3,7\n"
-    << "  --profit-takes off,0.25,0.50,0.75\n"
-    << "  --loss-cuts off,0.50,1.00\n";
+    << "  --wings fixed:2,fixed:1.3,credit,theta\n"
+    << "  --roll-dtes 0\n"
+    << "  --profit-takes off,0.75\n"
+    << "  --loss-cuts off\n";
 }
 
 }  // namespace
