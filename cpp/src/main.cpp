@@ -2,12 +2,14 @@
 #include "wbt/yield.hpp"
 #include "wbt/strategy.hpp"
 #include "wbt/gbs.hpp"
+#include "wbt/chain.hpp"
 #include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <filesystem>
 
 using namespace wbt;
 
@@ -21,6 +23,10 @@ static void usage(const char* argv0) {
     "  --start-date YYYY-MM-DD  Inclusive start (default: first day in file)\n"
     "  --end-date YYYY-MM-DD    Inclusive end (default: last day in file)\n"
     "  --trade-every-n-days N   Keep every Nth session (default 1)\n"
+    "  --iv-smile <path.csv>    IV smile CSV (default: <data-dir>/<stem>-ivsmile.csv;\n"
+    "                           build if missing, reuse if present)\n"
+    "  --cache <path.bin>       Binary options cache (load if present, else build+save)\n"
+    "  --atm-band X             Keep strikes within ±X of spot when loading (default 0)\n"
     "\n"
     "Structure:\n"
     "  --short-dte N            Target DTE for short (body) legs (default 30)\n"
@@ -83,12 +89,14 @@ static void write_trades_csv(const std::string& path,
 
 int main(int argc, char** argv) {
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
+  std::string iv_smile_path, cache_path;
   WParam param;
   param.enable_gamma_scalp = false;
   param.eval_expected_pnl = false;
   param.roll_dte = 0;
   Date start = 0, end = 0;
   int every_n = 1;
+  double atm_band = 0.0;
   int bench = 1;
   bool verbose = false;
   std::string verbose_out = "transactions.csv";
@@ -101,6 +109,9 @@ int main(int argc, char** argv) {
     };
     if (eq("-i")) input = need();
     else if (eq("-y")) yield = need();
+    else if (eq("--iv-smile")) iv_smile_path = need();
+    else if (eq("--cache")) cache_path = need();
+    else if (eq("--atm-band")) atm_band = std::atof(need());
     else if (eq("--short-dte")) param.short_dte = std::atoi(need());
     else if (eq("--long-dte")) param.long_dte = std::atoi(need());
     else if (eq("--short-delta")) param.short_delta = std::atof(need());
@@ -152,9 +163,38 @@ int main(int argc, char** argv) {
   if (input.empty()) {
     input = "data/SPY_fixture_small.csv";
   }
+  if (iv_smile_path.empty()) {
+    // Beside the options file: <stem>-ivsmile.csv (e.g. QQQ.csv → QQQ-ivsmile.csv).
+    iv_smile_path = default_iv_smile_path(input);
+  }
 
   load_yield_data(yield);
-  auto ds = load_options_csv(input, start, end, every_n);
+  OptionsDataset ds;
+  if (!cache_path.empty()) {
+    namespace fs = std::filesystem;
+    bool loaded = false;
+    if (fs::exists(cache_path)) {
+      try {
+        ds = load_dataset_cache(cache_path);
+        loaded = true;
+      } catch (const std::exception& e) {
+        std::cerr << "Cache load failed (" << e.what() << "), rebuilding...\n";
+      }
+    }
+    if (!loaded) {
+      ds = load_options_csv(input, start, end, every_n, atm_band);
+      try {
+        if (auto parent = fs::path(cache_path).parent_path(); !parent.empty())
+          fs::create_directories(parent);
+        save_dataset_cache(ds, cache_path);
+      } catch (const std::exception& e) {
+        std::cerr << "Cache save failed (" << e.what() << ")\n";
+      }
+    }
+  } else {
+    ds = load_options_csv(input, start, end, every_n, atm_band);
+  }
+  ensure_iv_smile_csv(ds, iv_smile_path, 0.45);
 
   // Verbose trade log is only needed on the last (or sole) run.
   BacktestResult last;

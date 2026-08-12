@@ -50,6 +50,7 @@ for job in "${JOBS[@]}"; do
   echo ""
   echo "===== $SYM =====" | tee -a "$LOG"
   echo "input=$INPUT" | tee -a "$LOG"
+  echo "iv-smile=$(dirname "$INPUT")/${SYM}-ivsmile.csv (default beside data)" | tee -a "$LOG"
   SYM_T0=$(date +%s)
   "$W_SEARCH" --symbol "$SYM" \
     -i "$INPUT" -y "$YIELD" \

@@ -2,8 +2,19 @@
 #include "wbt/gbs.hpp"
 #include "wbt/yield.hpp"
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <cstdint>
+#include <cctype>
 #include <algorithm>
 #include <limits>
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <iomanip>
+#include <chrono>
+#include <filesystem>
+#include <iterator>
 
 namespace wbt {
 
@@ -61,50 +72,456 @@ static long long iv_key(OptType t, Date exp) {
   return (static_cast<long long>(exp) << 8) | static_cast<long long>(opt_type_char(t));
 }
 
-static std::vector<std::pair<double, double>> chain_iv_by_moneyness(
-    const OptionsDataset& ds, OptType type, Date exp, double spot, Date as_of,
-    double band = 0.45) {
-  std::vector<std::pair<double, double>> pts;
-  int days = std::max(days_between(as_of, exp), 1);
-  double t = days / YEAR_FRAC;
-  double r = get_risk_free_rate(as_of, t);
-  double q = get_dividend_yield(as_of);
-  double lo_k = spot * (1.0 - band), hi_k = spot * (1.0 + band);
-  auto [b, e] = ds.quotes_for(as_of, exp, type);
-  if (!b) return pts;
-  pts.reserve(static_cast<size_t>(e - b));
-  for (auto p = b; p != e; ++p) {
-    if (p->strike < lo_k || p->strike > hi_k) continue;
-    double mid = p->mid();
-    if (mid <= 0 || !std::isfinite(mid)) continue;
-    auto san = sanitize_option_price_for_iv(type, spot, p->strike, t, r, q, mid);
-    if (!san) continue;
-    try {
-      double iv = euro_implied_vol(type, spot, p->strike, t, r, q, *san);
-      if (iv > 0 && std::isfinite(iv)) pts.push_back({p->strike / spot, iv});
-    } catch (...) {}
+double IvSmile::ensure_iv(size_t i) const {
+  double& slot = iv[i];
+  if (std::isfinite(slot) && slot > 0) return slot;
+  // Precomputed smiles may omit mid; treat missing mid as unsolvable.
+  if (i >= mid.size() || !std::isfinite(mid[i])) {
+    slot = std::numeric_limits<double>::quiet_NaN();
+    return slot;
   }
-  // quotes_for already returns strike-ascending order
-  return pts;
+  const double disc_k = moneyness[i] * spot * ert;
+  double lo, hi;
+  if (type == OptType::Put) {
+    lo = std::max(disc_k - disc_s, 0.0);
+    hi = disc_k;
+  } else {
+    lo = std::max(disc_s - disc_k, 0.0);
+    hi = disc_s;
+  }
+  if (hi <= lo) {
+    slot = std::numeric_limits<double>::quiet_NaN();
+    return slot;
+  }
+  const double eps = std::max(1e-6, hi * 1e-6);
+  const double san = std::min(std::max(mid[i], lo + eps), hi - eps);
+  const double solved = euro_implied_vol(type, spot, moneyness[i] * spot, t, r, q, san);
+  slot = (solved > 0 && std::isfinite(solved))
+             ? solved
+             : std::numeric_limits<double>::quiet_NaN();
+  return slot;
 }
 
-static double interp_iv_at_moneyness(const std::vector<std::pair<double, double>>& pts,
-                                     double m) {
-  if (pts.empty()) return std::numeric_limits<double>::quiet_NaN();
-  if (m <= pts.front().first) return pts.front().second;
-  if (m >= pts.back().first) return pts.back().second;
-  auto it = std::lower_bound(pts.begin(), pts.end(), m,
-                             [](const std::pair<double, double>& p, double mv) {
-                               return p.first < mv;
-                             });
-  if (it == pts.begin()) return pts.front().second;
-  auto prev = it - 1;
-  if (it == pts.end()) return pts.back().second;
-  double m0 = prev->first, m1 = it->first;
-  double iv0 = prev->second, iv1 = it->second;
+double IvSmile::at_moneyness(double m) const {
+  if (moneyness.empty()) return std::numeric_limits<double>::quiet_NaN();
+  if (m <= moneyness.front()) return ensure_iv(0);
+  if (m >= moneyness.back()) return ensure_iv(moneyness.size() - 1);
+  auto it = std::lower_bound(moneyness.begin(), moneyness.end(), m);
+  size_t hi = static_cast<size_t>(it - moneyness.begin());
+  if (hi == 0) return ensure_iv(0);
+  size_t lo = hi - 1;
+  // Walk outward if a bracket IV fails to solve.
+  while (lo > 0 && !std::isfinite(ensure_iv(lo))) --lo;
+  while (hi + 1 < moneyness.size() && !std::isfinite(ensure_iv(hi))) ++hi;
+  double iv0 = ensure_iv(lo), iv1 = ensure_iv(hi);
+  if (!std::isfinite(iv0)) return iv1;
+  if (!std::isfinite(iv1)) return iv0;
+  double m0 = moneyness[lo], m1 = moneyness[hi];
   if (m1 == m0) return iv0;
   double w = (m - m0) / (m1 - m0);
   return iv0 * (1 - w) + iv1 * w;
+}
+
+static IvSmile build_iv_smile(const OptionsDataset& ds, OptType type, Date exp,
+                              double spot, Date as_of, double band = 0.45) {
+  IvSmile smile;
+  smile.type = type;
+  smile.spot = spot;
+  int days = std::max(days_between(as_of, exp), 1);
+  smile.t = days / YEAR_FRAC;
+  smile.r = get_risk_free_rate(as_of, smile.t);
+  smile.q = get_dividend_yield(as_of);
+  smile.disc_s = spot * std::exp(-smile.q * smile.t);
+  smile.ert = std::exp(-smile.r * smile.t);
+  double lo_k = spot * (1.0 - band), hi_k = spot * (1.0 + band);
+  auto [b, e] = ds.quotes_for(as_of, exp, type);
+  if (!b) return smile;
+  const size_t n = static_cast<size_t>(e - b);
+  smile.moneyness.reserve(n);
+  smile.mid.reserve(n);
+  const double inv_spot = 1.0 / spot;
+  for (auto p = b; p != e; ++p) {
+    if (p->strike < lo_k || p->strike > hi_k) continue;
+    double m = p->mid();
+    if (m <= 0 || !std::isfinite(m)) continue;
+    smile.moneyness.push_back(p->strike * inv_spot);
+    smile.mid.push_back(m);
+  }
+  smile.iv.assign(smile.moneyness.size(),
+                  std::numeric_limits<double>::quiet_NaN());
+  return smile;
+}
+
+// Keep only successfully solved (moneyness, iv) points — matches old eager smile.
+static IvSmile compact_solved_smile(IvSmile smile) {
+  IvSmile out;
+  out.type = smile.type;
+  out.spot = smile.spot;
+  out.t = smile.t;
+  out.r = smile.r;
+  out.q = smile.q;
+  out.disc_s = smile.disc_s;
+  out.ert = smile.ert;
+  out.moneyness.reserve(smile.moneyness.size());
+  out.iv.reserve(smile.moneyness.size());
+  for (size_t i = 0; i < smile.moneyness.size(); ++i) {
+    double v = smile.ensure_iv(i);
+    if (std::isfinite(v) && v > 0) {
+      out.moneyness.push_back(smile.moneyness[i]);
+      out.iv.push_back(v);
+    }
+  }
+  return out;
+}
+
+namespace {
+std::shared_ptr<const IvSmileStore> g_iv_smile_store;
+}  // namespace
+
+void set_iv_smile_store(std::shared_ptr<const IvSmileStore> store) {
+  g_iv_smile_store = std::move(store);
+}
+
+const IvSmileStore* get_iv_smile_store() {
+  return g_iv_smile_store.get();
+}
+
+void clear_iv_smile_store() {
+  g_iv_smile_store.reset();
+}
+
+const IvSmile* IvSmileStore::find(Date as_of, OptType type, Date exp) const {
+  IvSmileKey k{as_of, exp, opt_type_char(type)};
+  auto it = smiles.find(k);
+  return it == smiles.end() ? nullptr : &it->second;
+}
+
+IvSmileStore build_iv_smile_store(const OptionsDataset& ds, double band) {
+  IvSmileStore store;
+  for (Date as_of : ds.dates) {
+    double spot = ds.spot(as_of);
+    if (!(spot > 0) || !std::isfinite(spot)) continue;
+    auto exps = available_expirations(ds, as_of);
+    for (Date exp : exps) {
+      for (OptType type : {OptType::Call, OptType::Put}) {
+        auto smile = compact_solved_smile(
+            build_iv_smile(ds, type, exp, spot, as_of, band));
+        if (smile.moneyness.empty()) continue;
+        IvSmileKey key{as_of, exp, opt_type_char(type)};
+        store.smiles.emplace(key, std::move(smile));
+      }
+    }
+  }
+  return store;
+}
+
+void save_iv_smile_csv(const IvSmileStore& store, const std::string& path) {
+  namespace fs = std::filesystem;
+  if (auto parent = fs::path(path).parent_path(); !parent.empty())
+    fs::create_directories(parent);
+  std::ofstream out(path);
+  if (!out) throw std::runtime_error("cannot write iv smile csv " + path);
+  out << "as_of,exp,type,spot,moneyness,iv\n";
+  out << std::fixed << std::setprecision(10);
+  // Stable order for diffs / reproducibility.
+  std::vector<const std::pair<const IvSmileKey, IvSmile>*> rows;
+  rows.reserve(store.smiles.size());
+  for (auto& kv : store.smiles) rows.push_back(&kv);
+  std::sort(rows.begin(), rows.end(), [](const auto* a, const auto* b) {
+    if (a->first.as_of != b->first.as_of) return a->first.as_of < b->first.as_of;
+    if (a->first.exp != b->first.exp) return a->first.exp < b->first.exp;
+    return a->first.type < b->first.type;
+  });
+  size_t n_pts = 0;
+  for (auto* kv : rows) {
+    const auto& key = kv->first;
+    const auto& smile = kv->second;
+    for (size_t i = 0; i < smile.moneyness.size(); ++i) {
+      out << format_date(key.as_of) << ','
+          << format_date(key.exp) << ','
+          << key.type << ','
+          << smile.spot << ','
+          << smile.moneyness[i] << ','
+          << smile.iv[i] << '\n';
+      ++n_pts;
+    }
+  }
+  std::cerr << "Wrote IV smile CSV " << path
+            << " smiles=" << store.smiles.size()
+            << " points=" << n_pts << "\n";
+}
+
+namespace {
+
+inline bool parse_ymd10(const char* b, Date& out) {
+  if (b[4] != '-' || b[7] != '-') return false;
+  auto dig = [](char c) -> int { return (c >= '0' && c <= '9') ? (c - '0') : -1; };
+  int y0 = dig(b[0]), y1 = dig(b[1]), y2 = dig(b[2]), y3 = dig(b[3]);
+  int m0 = dig(b[5]), m1 = dig(b[6]);
+  int d0 = dig(b[8]), d1 = dig(b[9]);
+  if ((y0 | y1 | y2 | y3 | m0 | m1 | d0 | d1) < 0) return false;
+  out = ymd(y0 * 1000 + y1 * 100 + y2 * 10 + y3, m0 * 10 + m1, d0 * 10 + d1);
+  return true;
+}
+
+inline bool parse_dec(const char* b, const char* e, double& out) {
+  if (b >= e) return false;
+  bool neg = false;
+  if (*b == '-') { neg = true; ++b; if (b >= e) return false; }
+  uint64_t ip = 0;
+  const char* p = b;
+  while (p < e && *p >= '0' && *p <= '9') {
+    ip = ip * 10u + static_cast<uint64_t>(*p - '0');
+    ++p;
+  }
+  double val = static_cast<double>(ip);
+  if (p < e && *p == '.') {
+    ++p;
+    uint64_t fp = 0;
+    int n = 0;
+    while (p < e && *p >= '0' && *p <= '9') {
+      fp = fp * 10u + static_cast<uint64_t>(*p - '0');
+      ++n;
+      ++p;
+    }
+    if (n > 0) {
+      static const double scale[] = {
+          1.0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12};
+      val += n < 13 ? static_cast<double>(fp) / scale[n]
+                    : static_cast<double>(fp) / std::pow(10.0, n);
+    }
+  }
+  if (p != e) return false;
+  out = neg ? -val : val;
+  return true;
+}
+
+inline const char* find_comma(const char* p, const char* end) {
+  while (p < end && *p != ',') ++p;
+  return p;
+}
+
+std::string iv_smile_bin_path(const std::string& csv_path) {
+  // QQQ-ivsmile.csv → QQQ-ivsmile.bin
+  if (csv_path.size() >= 4 &&
+      (csv_path.compare(csv_path.size() - 4, 4, ".csv") == 0 ||
+       csv_path.compare(csv_path.size() - 4, 4, ".CSV") == 0)) {
+    return csv_path.substr(0, csv_path.size() - 4) + ".bin";
+  }
+  return csv_path + ".bin";
+}
+
+void save_iv_smile_bin(const IvSmileStore& store, const std::string& path) {
+  namespace fs = std::filesystem;
+  if (auto parent = fs::path(path).parent_path(); !parent.empty())
+    fs::create_directories(parent);
+  std::ofstream out(path, std::ios::binary);
+  if (!out) throw std::runtime_error("cannot write iv smile bin " + path);
+  const char magic[8] = {'W', 'B', 'T', 'I', 'V', 'S', 'M', '1'};
+  out.write(magic, 8);
+  uint64_t n = store.smiles.size();
+  out.write(reinterpret_cast<const char*>(&n), sizeof(n));
+  size_t n_pts = 0;
+  for (const auto& kv : store.smiles) {
+    const auto& key = kv.first;
+    const auto& smile = kv.second;
+    int32_t as_of = key.as_of, exp = key.exp;
+    char type = key.type;
+    double spot = smile.spot;
+    uint32_t npt = static_cast<uint32_t>(smile.moneyness.size());
+    out.write(reinterpret_cast<const char*>(&as_of), sizeof(as_of));
+    out.write(reinterpret_cast<const char*>(&exp), sizeof(exp));
+    out.write(&type, 1);
+    out.write(reinterpret_cast<const char*>(&spot), sizeof(spot));
+    out.write(reinterpret_cast<const char*>(&npt), sizeof(npt));
+    if (npt) {
+      out.write(reinterpret_cast<const char*>(smile.moneyness.data()),
+                static_cast<std::streamsize>(npt * sizeof(double)));
+      out.write(reinterpret_cast<const char*>(smile.iv.data()),
+                static_cast<std::streamsize>(npt * sizeof(double)));
+      n_pts += npt;
+    }
+  }
+  std::cerr << "Wrote IV smile bin " << path
+            << " smiles=" << n << " points=" << n_pts << "\n";
+}
+
+IvSmileStore load_iv_smile_bin(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("cannot read iv smile bin " + path);
+  char magic[8];
+  in.read(magic, 8);
+  if (std::string(magic, magic + 8) != "WBTIVSM1")
+    throw std::runtime_error("bad iv smile bin magic");
+  uint64_t n = 0;
+  in.read(reinterpret_cast<char*>(&n), sizeof(n));
+  IvSmileStore store;
+  store.smiles.reserve(static_cast<size_t>(n) * 2);
+  size_t n_pts = 0;
+  for (uint64_t i = 0; i < n; ++i) {
+    int32_t as_of = 0, exp = 0;
+    char type = 'c';
+    double spot = 0;
+    uint32_t npt = 0;
+    in.read(reinterpret_cast<char*>(&as_of), sizeof(as_of));
+    in.read(reinterpret_cast<char*>(&exp), sizeof(exp));
+    in.read(&type, 1);
+    in.read(reinterpret_cast<char*>(&spot), sizeof(spot));
+    in.read(reinterpret_cast<char*>(&npt), sizeof(npt));
+    IvSmileKey key{as_of, exp, type};
+    IvSmile smile;
+    smile.type = parse_opt_type(type);
+    smile.spot = spot;
+    smile.moneyness.resize(npt);
+    smile.iv.resize(npt);
+    if (npt) {
+      in.read(reinterpret_cast<char*>(smile.moneyness.data()),
+              static_cast<std::streamsize>(npt * sizeof(double)));
+      in.read(reinterpret_cast<char*>(smile.iv.data()),
+              static_cast<std::streamsize>(npt * sizeof(double)));
+      n_pts += npt;
+    }
+    store.smiles.emplace(key, std::move(smile));
+  }
+  std::cerr << "Loaded IV smile bin " << path
+            << " smiles=" << store.smiles.size()
+            << " points=" << n_pts << "\n";
+  return store;
+}
+
+}  // namespace
+
+IvSmileStore load_iv_smile_csv(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("cannot read iv smile csv " + path);
+  std::string buf((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (buf.empty()) throw std::runtime_error("empty iv smile csv " + path);
+
+  const char* p = buf.data();
+  const char* end = p + buf.size();
+  // skip header
+  while (p < end && *p != '\n') ++p;
+  if (p < end) ++p;
+
+  IvSmileStore store;
+  IvSmileKey cur{};
+  IvSmile* smile = nullptr;
+  size_t n_pts = 0;
+  while (p < end) {
+    const char* lb = p;
+    while (p < end && *p != '\n') ++p;
+    const char* le = p;
+    if (p < end) ++p;
+    if (le > lb && le[-1] == '\r') --le;
+    if (lb == le) continue;
+
+    // as_of,exp,type,spot,moneyness,iv
+    const char* c0 = find_comma(lb, le);
+    if (c0 >= le || c0 - lb < 10) continue;
+    const char* c1 = find_comma(c0 + 1, le);
+    if (c1 >= le || c1 - (c0 + 1) < 10) continue;
+    const char* c2 = find_comma(c1 + 1, le);
+    if (c2 >= le) continue;
+    const char* c3 = find_comma(c2 + 1, le);
+    if (c3 >= le) continue;
+    const char* c4 = find_comma(c3 + 1, le);
+    if (c4 >= le) continue;
+
+    Date as_of = 0, exp = 0;
+    if (!parse_ymd10(lb, as_of) || !parse_ymd10(c0 + 1, exp)) continue;
+    char type = static_cast<char>(std::tolower(static_cast<unsigned char>(*(c1 + 1))));
+    double spot = 0, m = 0, iv = 0;
+    if (!parse_dec(c2 + 1, c3, spot)) continue;
+    if (!parse_dec(c3 + 1, c4, m)) continue;
+    if (!parse_dec(c4 + 1, le, iv)) continue;
+    if (!(iv > 0) || !std::isfinite(iv) || !std::isfinite(m)) continue;
+
+    IvSmileKey key{as_of, exp, type};
+    if (!smile || key.as_of != cur.as_of || key.exp != cur.exp || key.type != cur.type) {
+      cur = key;
+      auto [it, inserted] = store.smiles.try_emplace(key);
+      smile = &it->second;
+      if (inserted) {
+        smile->type = parse_opt_type(type);
+        smile->spot = spot;
+        smile->moneyness.reserve(64);
+        smile->iv.reserve(64);
+      }
+    }
+    smile->moneyness.push_back(m);
+    smile->iv.push_back(iv);
+    ++n_pts;
+  }
+  std::cerr << "Loaded IV smile CSV " << path
+            << " smiles=" << store.smiles.size()
+            << " points=" << n_pts << "\n";
+  return store;
+}
+
+std::shared_ptr<const IvSmileStore> ensure_iv_smile_csv(const OptionsDataset& ds,
+                                                        const std::string& path,
+                                                        double band) {
+  namespace fs = std::filesystem;
+  if (path.empty()) {
+    clear_iv_smile_store();
+    return nullptr;
+  }
+  const std::string bin_path = iv_smile_bin_path(path);
+  std::shared_ptr<const IvSmileStore> store;
+
+  // Prefer binary sidecar (much faster than 100MB+ CSV).
+  if (fs::exists(bin_path)) {
+    try {
+      store = std::make_shared<const IvSmileStore>(load_iv_smile_bin(bin_path));
+      set_iv_smile_store(store);
+      return store;
+    } catch (const std::exception& e) {
+      std::cerr << "IV smile bin load failed (" << e.what() << "), trying CSV...\n";
+    }
+  }
+
+  if (fs::exists(path)) {
+    try {
+      auto loaded = load_iv_smile_csv(path);
+      try { save_iv_smile_bin(loaded, bin_path); } catch (...) {}
+      store = std::make_shared<const IvSmileStore>(std::move(loaded));
+      set_iv_smile_store(store);
+      return store;
+    } catch (const std::exception& e) {
+      std::cerr << "IV smile load failed (" << e.what() << "), rebuilding...\n";
+    }
+  }
+  auto t0 = std::chrono::steady_clock::now();
+  auto built = build_iv_smile_store(ds, band);
+  auto t1 = std::chrono::steady_clock::now();
+  std::cerr << "Built IV smile store in "
+            << std::chrono::duration<double>(t1 - t0).count() << "s\n";
+  save_iv_smile_csv(built, path);
+  try { save_iv_smile_bin(built, bin_path); } catch (...) {}
+  store = std::make_shared<const IvSmileStore>(std::move(built));
+  set_iv_smile_store(store);
+  return store;
+}
+
+std::string default_iv_smile_path(const std::string& options_csv_path,
+                                  const std::string& symbol) {
+  namespace fs = std::filesystem;
+  fs::path in(options_csv_path);
+  fs::path dir = in.parent_path();
+  if (dir.empty()) dir = ".";
+
+  std::string base = symbol;
+  if (base.empty()) {
+    std::string name = in.filename().string();
+    auto ends_with = [](const std::string& s, const char* suf) {
+      const size_t n = std::strlen(suf);
+      return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+    };
+    if (ends_with(name, ".gz")) name.resize(name.size() - 3);
+    if (ends_with(name, ".csv") || ends_with(name, ".CSV")) name.resize(name.size() - 4);
+    base = name.empty() ? "options" : name;
+  }
+  return (dir / (base + "-ivsmile.csv")).string();
 }
 
 static double anchor_iv(const OptionsDataset& ds, OptType type, Date exp,
@@ -116,7 +533,6 @@ static double anchor_iv(const OptionsDataset& ds, OptType type, Date exp,
   auto [b, e] = ds.quotes_for(as_of, exp, type);
   if (!b) return 0.20;
 
-  // Same selection as before (nearest strikes first), but only over this expiry.
   std::vector<std::pair<double, const OptionQuote*>> ranked;
   ranked.reserve(static_cast<size_t>(e - b));
   for (auto p = b; p != e; ++p)
@@ -131,10 +547,8 @@ static double anchor_iv(const OptionsDataset& ds, OptType type, Date exp,
     if (mid <= 0) continue;
     auto san = sanitize_option_price_for_iv(type, spot, row->strike, t, r, q, mid);
     if (!san) continue;
-    try {
-      double iv = euro_implied_vol(type, spot, row->strike, t, r, q, *san);
-      if (iv > 0 && std::isfinite(iv)) return iv;
-    } catch (...) {}
+    double iv = euro_implied_vol(type, spot, row->strike, t, r, q, *san);
+    if (iv > 0 && std::isfinite(iv)) return iv;
   }
   return 0.20;
 }
@@ -152,18 +566,23 @@ std::optional<double> interpolate_iv_for_dte(const OptionsDataset& ds, OptType t
 
   IvCache local_iv;
   IvCache* use_cache = cache ? cache : &local_iv;
-  auto get_pts = [&](Date exp) -> const std::vector<std::pair<double, double>>& {
+  const IvSmileStore* smile_store = get_iv_smile_store();
+  auto get_smile = [&](Date exp) -> const IvSmile& {
     long long k = iv_key(type, exp);
     auto it = use_cache->find(k);
-    if (it == use_cache->end()) {
-      it = use_cache->emplace(k, chain_iv_by_moneyness(ds, type, exp, spot, as_of)).first;
+    if (it != use_cache->end()) return it->second;
+    if (smile_store) {
+      if (const IvSmile* pre = smile_store->find(as_of, type, exp)) {
+        return *pre;
+      }
     }
+    it = use_cache->emplace(k, build_iv_smile(ds, type, exp, spot, as_of)).first;
     return it->second;
   };
 
   double moneyness = strike / spot;
   double t_target = std::max(target_dte, 1) / YEAR_FRAC;
-  double iv_lo = interp_iv_at_moneyness(get_pts(lo), moneyness);
+  double iv_lo = get_smile(lo).at_moneyness(moneyness);
   if (!std::isfinite(iv_lo)) return std::nullopt;
 
   if (!hi || hi == lo) {
@@ -174,7 +593,7 @@ std::optional<double> interpolate_iv_for_dte(const OptionsDataset& ds, OptType t
     return iv;
   }
 
-  double iv_hi = interp_iv_at_moneyness(get_pts(hi), moneyness);
+  double iv_hi = get_smile(hi).at_moneyness(moneyness);
   if (!std::isfinite(iv_hi)) return iv_lo;
 
   double t_lo = std::max(days_between(as_of, lo), 1) / YEAR_FRAC;
@@ -200,7 +619,6 @@ std::optional<SyntheticQuote> synthetic_option_quote(
   double r = get_risk_free_rate(as_of, t);
   double q = get_dividend_yield(as_of);
 
-  // Exact listed
   auto [b, e] = ds.quotes_for(as_of, target_exp, type);
   if (b) {
     auto it = std::lower_bound(
@@ -211,12 +629,10 @@ std::optional<SyntheticQuote> synthetic_option_quote(
       qte.bid = it->bid; qte.ask = it->ask; qte.mid = mid;
       qte.strike = strike; qte.exp_date = target_exp; qte.data_date = as_of;
       qte.underlying = spot; qte.put_call = type; qte.interpolated = false;
-      try {
-        auto san = sanitize_option_price_for_iv(type, spot, strike, t, r, q, mid);
-        double iv = san ? euro_implied_vol(type, spot, strike, t, r, q, *san) : 0.2;
-        auto g = merton(type, spot, strike, t, r, q, iv);
-        qte.implied_vol = iv; qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
-      } catch (...) {}
+      auto san = sanitize_option_price_for_iv(type, spot, strike, t, r, q, mid);
+      double iv = san ? euro_implied_vol(type, spot, strike, t, r, q, *san) : 0.2;
+      auto g = merton(type, spot, strike, t, r, q, iv);
+      qte.implied_vol = iv; qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
       return qte;
     }
   }
@@ -282,11 +698,9 @@ std::optional<SyntheticQuote> find_option_by_delta(
       if (type == OptType::Call && p->strike < spot * 0.97) return;
       if (type == OptType::Put && p->strike > spot * 1.03) return;
     }
-    try {
-      double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
-      if (!std::isfinite(delta)) return;
-      ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
-    } catch (...) {}
+    double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
+    if (!std::isfinite(delta)) return;
+    ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
   };
 
   for (auto p = b; p != e; ++p) consider(p, prefer_otm);
@@ -294,10 +708,8 @@ std::optional<SyntheticQuote> find_option_by_delta(
     for (auto p = b; p != e; ++p) {
       double mid = p->mid();
       if (mid <= 0) continue;
-      try {
-        double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
-        ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
-      } catch (...) {}
+      double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
+      ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
     }
   }
   if (ranked.empty()) return std::nullopt;
@@ -317,27 +729,25 @@ std::optional<SyntheticQuote> find_option_by_delta(
       quote = synthetic_option_quote(ds, type, as_of, spot, ranked[i].k, use_dte,
                                      slip_pct, use_cache);
     } else {
-      try {
-        auto san = sanitize_option_price_for_iv(
-            type, spot, ranked[i].k, t, r, q, ranked[i].mid);
-        double iv = san ? euro_implied_vol(type, spot, ranked[i].k, t, r, q, *san)
-                        : anchor;
-        auto g = merton(type, spot, ranked[i].k, t, r, q, iv);
-        SyntheticQuote qte;
-        double half = ranked[i].mid * slip_pct;
-        qte.bid = std::max(ranked[i].mid - half, 0.0);
-        qte.ask = ranked[i].mid + half;
-        qte.mid = ranked[i].mid;
-        qte.strike = ranked[i].k;
-        qte.exp_date = nearest;
-        qte.data_date = as_of;
-        qte.underlying = spot;
-        qte.put_call = type;
-        qte.implied_vol = iv;
-        qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
-        qte.interpolated = false;
-        quote = qte;
-      } catch (...) { continue; }
+      auto san = sanitize_option_price_for_iv(
+          type, spot, ranked[i].k, t, r, q, ranked[i].mid);
+      double iv = san ? euro_implied_vol(type, spot, ranked[i].k, t, r, q, *san)
+                      : anchor;
+      auto g = merton(type, spot, ranked[i].k, t, r, q, iv);
+      SyntheticQuote qte;
+      double half = ranked[i].mid * slip_pct;
+      qte.bid = std::max(ranked[i].mid - half, 0.0);
+      qte.ask = ranked[i].mid + half;
+      qte.mid = ranked[i].mid;
+      qte.strike = ranked[i].k;
+      qte.exp_date = nearest;
+      qte.data_date = as_of;
+      qte.underlying = spot;
+      qte.put_call = type;
+      qte.implied_vol = iv;
+      qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
+      qte.interpolated = false;
+      quote = qte;
     }
     if (!quote) continue;
     double err = std::abs(quote->delta - target_delta);

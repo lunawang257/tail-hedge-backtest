@@ -45,6 +45,18 @@ inline Date from_serial(int serial) {
 }  // namespace
 
 Date parse_date(const std::string& s) {
+  // Fast path: YYYY-MM-DD (exactly 10 chars, digits in place)
+  if (s.size() >= 10 && s[4] == '-' && s[7] == '-') {
+    auto dig = [](char c) -> int {
+      return (c >= '0' && c <= '9') ? (c - '0') : -1;
+    };
+    int y0 = dig(s[0]), y1 = dig(s[1]), y2 = dig(s[2]), y3 = dig(s[3]);
+    int m0 = dig(s[5]), m1 = dig(s[6]);
+    int d0 = dig(s[8]), d1 = dig(s[9]);
+    if ((y0 | y1 | y2 | y3 | m0 | m1 | d0 | d1) >= 0) {
+      return ymd(y0 * 1000 + y1 * 100 + y2 * 10 + y3, m0 * 10 + m1, d0 * 10 + d1);
+    }
+  }
   int y = 0, m = 0, d = 0;
   if (std::sscanf(s.c_str(), "%d-%d-%d", &y, &m, &d) == 3) return ymd(y, m, d);
   if (std::sscanf(s.c_str(), "%d/%d/%d", &m, &d, &y) == 3) {

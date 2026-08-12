@@ -2,6 +2,7 @@
 #include "wbt/yield.hpp"
 #include "wbt/strategy.hpp"
 #include "wbt/types.hpp"
+#include "wbt/chain.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -326,6 +327,8 @@ void usage(const char* argv0) {
     << "Usage: " << argv0 << " --symbol SYM -i options.csv [options]\n"
     << "  -y yield.csv           Yield curve\n"
     << "  --cache path           Binary cache path\n"
+    << "  --iv-smile path.csv    IV smile CSV (default: <data-dir>/<SYM>-ivsmile.csv;\n"
+    << "                         build if missing, reuse if present)\n"
     << "  --start-date YYYY-MM-DD\n"
     << "  --end-date YYYY-MM-DD\n"
     << "  --every-n N            Session thinning (default 5)\n"
@@ -354,7 +357,7 @@ void usage(const char* argv0) {
 int main(int argc, char** argv) {
   std::string symbol = "SPY";
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
-  std::string cache_path, out_path;
+  std::string cache_path, out_path, iv_smile_path;
   Date start = 20180101, end = 20191231;
   int every_n = 5;
   double atm_band = 0.20;
@@ -378,6 +381,7 @@ int main(int argc, char** argv) {
       else if (eq("-i")) input = need();
       else if (eq("-y")) yield = need();
       else if (eq("--cache")) cache_path = need();
+      else if (eq("--iv-smile")) iv_smile_path = need();
       else if (eq("--start-date")) start = parse_date(need());
       else if (eq("--end-date")) end = parse_date(need());
       else if (eq("--every-n")) every_n = std::atoi(need());
@@ -425,6 +429,7 @@ int main(int argc, char** argv) {
                  std::to_string(end) + "_e" + std::to_string(every_n) + "_atm.bin";
   }
   if (out_path.empty()) out_path = "search-" + symbol + "-cpp.csv";
+  if (iv_smile_path.empty()) iv_smile_path = default_iv_smile_path(input, symbol);
 
   load_yield_data(yield);
   auto ds = ensure_cache(input, cache_path, start, end, every_n, atm_band);
@@ -432,6 +437,8 @@ int main(int argc, char** argv) {
     std::cerr << "No data in range\n";
     return 1;
   }
+  // Always load or build IV smiles beside the options data (or --iv-smile override).
+  ensure_iv_smile_csv(ds, iv_smile_path, 0.45);
 
   auto grid = build_grid(grid_spec, units);
   if (limit > 0 && static_cast<int>(grid.size()) > limit)
