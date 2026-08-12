@@ -18,8 +18,10 @@ struct YieldRow {
 
 std::vector<std::pair<std::string, double>> tenors_;
 std::vector<YieldRow> rows_;  // sorted by date ascending
-std::unordered_map<long long, double> rf_cache_;
-std::unordered_map<int, double> div_cache_;
+// Per-thread: w_search workers call get_* concurrently; a shared
+// unordered_map rehash races and can spin forever (seen at ~8063/8064).
+thread_local std::unordered_map<long long, double> rf_cache_;
+thread_local std::unordered_map<int, double> div_cache_;
 
 long long rf_key(Date d, double t) {
   return (static_cast<long long>(d) << 20) ^ static_cast<long long>(std::llround(t * 1e8));
