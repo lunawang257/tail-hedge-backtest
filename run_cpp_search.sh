@@ -29,7 +29,7 @@ fi
 # symbol|input_csv|cache_bin|out_csv
 declare -a JOBS=(
   "SPX|$OPTIONS_DATA/SPX.csv|$ROOT/data/cache/SPX_${START//-}_${END//-}_e${EVERY_N}_atm.bin|$ROOT/search-SPX-cpp-${START}-${END}.csv"
-  "QQQ|$OPTIONS_DATA/opt-prices/QQQ.csv.gz|$ROOT/data/cache/QQQ_${START//-}_${END//-}_e${EVERY_N}_atm.bin|$ROOT/search-QQQ-cpp-${START}-${END}.csv"
+  "QQQ|$OPTIONS_DATA/opt-prices/QQQ.csv|$ROOT/data/cache/QQQ_${START//-}_${END//-}_e${EVERY_N}_atm.bin|$ROOT/search-QQQ-cpp-${START}-${END}.csv"
   "AAPL|$OPTIONS_DATA/opt-prices/AAPL.csv|$ROOT/data/cache/AAPL_${START//-}_${END//-}_e${EVERY_N}_atm.bin|$ROOT/search-AAPL-cpp-${START}-${END}.csv"
 )
 
