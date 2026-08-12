@@ -242,6 +242,23 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units) {
   return out;
 }
 
+std::string format_duration(double sec) {
+  if (sec < 0) sec = 0;
+  long total = static_cast<long>(sec + 0.5);
+  long h = total / 3600;
+  long m = (total % 3600) / 60;
+  long s = total % 60;
+  std::ostringstream os;
+  if (h > 0)
+    os << h << "h" << std::setfill('0') << std::setw(2) << m << "m"
+       << std::setw(2) << s << "s";
+  else if (m > 0)
+    os << m << "m" << std::setfill('0') << std::setw(2) << s << "s";
+  else
+    os << s << "s";
+  return os.str();
+}
+
 void print_grid(const GridSpec& g, size_t n) {
   auto join_i = [](const std::vector<int>& v) {
     std::ostringstream os;
@@ -451,8 +468,10 @@ int main(int argc, char** argv) {
 
   std::vector<SearchResult> results(grid.size());
   std::atomic<size_t> next{0};
+  std::atomic<size_t> completed{0};
   std::mutex log_mu;
   auto t0 = std::chrono::steady_clock::now();
+  auto last_progress_print = t0 - std::chrono::seconds(2);
 
   auto worker = [&]() {
     while (true) {
@@ -469,24 +488,24 @@ int main(int argc, char** argv) {
       r.score = bt.annual_return - 0.5 * bt.max_drawdown;
       r.elapsed_sec = std::chrono::duration<double>(t2 - t1).count();
       results[i] = r;
+
+      size_t done = completed.fetch_add(1) + 1;
       std::lock_guard<std::mutex> lock(log_mu);
-      std::cerr << "[" << (i + 1) << "/" << grid.size() << "] score="
-                << std::fixed << std::setprecision(2) << r.score
-                << " ret=" << r.bt.annual_return << "% dd=" << r.bt.max_drawdown
-                << "% (" << r.elapsed_sec << "s) | sDTE=" << cfg.short_dte
-                << " lDTE=" << cfg.long_dte << " sΔ=" << cfg.short_delta
-                << " lΔ=" << cfg.long_delta << " wing=" << wing_name(cfg.wing_mode)
-                << (cfg.wing_mode == WingMode::Fixed
-                        ? (" M=" + std::to_string(cfg.m_call))
-                        : "")
-                << " rollDTE=" << cfg.roll_dte
-                << " pt=" << (cfg.enable_profit_take
-                                  ? std::to_string(cfg.profit_take_pct)
-                                  : "off")
-                << " lc=" << (cfg.enable_loss_cut
-                                  ? std::to_string(cfg.loss_cut_pct)
-                                  : "off")
-                << "\n";
+      const bool finished = done >= grid.size();
+      if (!finished && t2 - last_progress_print < std::chrono::seconds(2))
+        continue;
+      last_progress_print = t2;
+      double elapsed = std::chrono::duration<double>(t2 - t0).count();
+      double eta =
+          done > 0 ? elapsed * static_cast<double>(grid.size() - done) /
+                         static_cast<double>(done)
+                   : 0.0;
+      double pct =
+          100.0 * static_cast<double>(done) / static_cast<double>(grid.size());
+      std::cerr << "\rProgress: " << std::fixed << std::setprecision(1) << pct
+                << "% (" << done << "/" << grid.size()
+                << ")  elapsed: " << format_duration(elapsed)
+                << "  ETA: " << format_duration(eta) << "   " << std::flush;
     }
   };
 
@@ -497,9 +516,9 @@ int main(int argc, char** argv) {
   auto t_end = std::chrono::steady_clock::now();
   write_csv(out_path, results);
 
-  std::cerr << "Done in "
-            << std::chrono::duration<double>(t_end - t0).count()
-            << "s  wrote " << out_path << "\n";
+  double total_sec = std::chrono::duration<double>(t_end - t0).count();
+  std::cerr << "\nDone in " << format_duration(total_sec) << "  wrote "
+            << out_path << "\n";
   std::cerr << "=== TOP 10 " << symbol << " ===\n";
   for (size_t i = 0; i < results.size() && i < 10; ++i) {
     auto& r = results[i];
