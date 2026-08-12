@@ -224,12 +224,21 @@ OptionsDataset load_options_csv(const std::string& path, Date start, Date end,
 void OptionsDataset::rebuild_index() {
   dates.clear();
   day_range.clear();
+  day_exps.clear();
   for (size_t i = 0; i < quotes.size();) {
     Date d = quotes[i].data_date;
     size_t j = i;
     while (j < quotes.size() && quotes[j].data_date == d) ++j;
     day_range[d] = {i, j};
     dates.push_back(d);
+
+    std::vector<Date> exps;
+    for (size_t k = i; k < j;) {
+      Date exp = quotes[k].exp_date;
+      exps.push_back(exp);
+      while (k < j && quotes[k].exp_date == exp) ++k;
+    }
+    day_exps.emplace(d, std::move(exps));
     i = j;
   }
 }
@@ -281,15 +290,32 @@ double OptionsDataset::spot(Date d) const {
   return b->underlying;
 }
 std::vector<Date> OptionsDataset::expirations(Date d) const {
-  std::vector<Date> exps;
-  auto b = begin(d), e = end(d);
-  if (!b) return exps;
-  for (auto p = b; p != e; ++p) {
-    if (std::find(exps.begin(), exps.end(), p->exp_date) == exps.end())
-      exps.push_back(p->exp_date);
-  }
-  std::sort(exps.begin(), exps.end());
-  return exps;
+  auto it = day_exps.find(d);
+  if (it == day_exps.end()) return {};
+  return it->second;
+}
+
+std::pair<const OptionQuote*, const OptionQuote*>
+OptionsDataset::quotes_for(Date d, Date exp, OptType type) const {
+  auto day_b = begin(d), day_e = end(d);
+  if (!day_b) return {nullptr, nullptr};
+
+  auto exp_lo = std::lower_bound(
+      day_b, day_e, exp,
+      [](const OptionQuote& q, Date e) { return q.exp_date < e; });
+  auto exp_hi = std::upper_bound(
+      exp_lo, day_e, exp,
+      [](Date e, const OptionQuote& q) { return e < q.exp_date; });
+  if (exp_lo == exp_hi) return {nullptr, nullptr};
+
+  auto type_lo = std::lower_bound(
+      exp_lo, exp_hi, type,
+      [](const OptionQuote& q, OptType t) { return q.put_call < t; });
+  auto type_hi = std::upper_bound(
+      type_lo, exp_hi, type,
+      [](OptType t, const OptionQuote& q) { return t < q.put_call; });
+  if (type_lo == type_hi) return {nullptr, nullptr};
+  return {type_lo, type_hi};
 }
 
 }  // namespace wbt

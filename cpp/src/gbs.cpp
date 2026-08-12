@@ -58,6 +58,38 @@ Greeks merton(OptType type, double fs, double x, double t, double r, double q, d
   return gbs(type, fs, x, t, r, r - q, v);
 }
 
+double merton_delta(OptType type, double fs, double x, double t, double r, double q, double v) {
+  double b = r - q;
+  if (t < MIN_T) t = MIN_T;
+  if (v < MIN_V) v = MIN_V;
+  if (v > MAX_V) v = MAX_V;
+  const double t_sqrt = std::sqrt(t);
+  const double d1 = (std::log(fs / x) + (b + 0.5 * v * v) * t) / (v * t_sqrt);
+  const double disc = std::exp((b - r) * t);
+  if (type == OptType::Call) return disc * norm_cdf(d1);
+  return -disc * norm_cdf(-d1);
+}
+
+void gbs_value_vega(OptType type, double fs, double x, double t, double r, double b,
+                    double v, double& value, double& vega) {
+  if (t < MIN_T) t = MIN_T;
+  if (v < MIN_V) v = MIN_V;
+  if (v > MAX_V) v = MAX_V;
+
+  const double t_sqrt = std::sqrt(t);
+  const double d1 = (std::log(fs / x) + (b + 0.5 * v * v) * t) / (v * t_sqrt);
+  const double d2 = d1 - v * t_sqrt;
+  const double ebrt = std::exp((b - r) * t);
+  const double ert = std::exp(-r * t);
+  const double pdf_d1 = norm_pdf(d1);
+  vega = ebrt * fs * t_sqrt * pdf_d1;
+  if (type == OptType::Call) {
+    value = fs * ebrt * norm_cdf(d1) - x * ert * norm_cdf(d2);
+  } else {
+    value = x * ert * norm_cdf(-d2) - fs * ebrt * norm_cdf(-d1);
+  }
+}
+
 static double approx_implied_vol(OptType type, double fs, double x, double t, double r, double b, double cp) {
   const double ebrt = std::exp((b - r) * t);
   const double ert = std::exp(-r * t);
@@ -81,8 +113,9 @@ static double bisection_implied_vol(OptType type, double fs, double x, double t,
     v_high = std::min(MAX_V, v_mid * 1.5);
   }
 
-  double cp_low = gbs(type, fs, x, t, r, b, v_low).value;
-  double cp_high = gbs(type, fs, x, t, r, b, v_high).value;
+  double cp_low, cp_high, unused;
+  gbs_value_vega(type, fs, x, t, r, b, v_low, cp_low, unused);
+  gbs_value_vega(type, fs, x, t, r, b, v_high, cp_high, unused);
 
   if (cp <= cp_low) return v_low;
   if (cp >= cp_high) return v_high;
@@ -92,7 +125,8 @@ static double bisection_implied_vol(OptType type, double fs, double x, double t,
     if (std::abs(cp_high - cp_low) < 1e-14) break;
     v_mid = v_low + (cp - cp_low) * (v_high - v_low) / (cp_high - cp_low);
     v_mid = std::min(std::max(v_mid, MIN_V), MAX_V);
-    double cp_mid = gbs(type, fs, x, t, r, b, v_mid).value;
+    double cp_mid;
+    gbs_value_vega(type, fs, x, t, r, b, v_mid, cp_mid, unused);
     if (std::abs(cp - cp_mid) < precision) return v_mid;
     if (cp_mid < cp) {
       v_low = v_mid;
@@ -114,18 +148,19 @@ double euro_implied_vol(OptType type, double fs, double x, double t, double r, d
   double v = approx_implied_vol(type, fs, x, t, r, b, cp);
   v = std::min(std::max(v, MIN_V), MAX_V);
 
-  auto g = gbs(type, fs, x, t, r, b, v);
-  double min_diff = std::abs(cp - g.value);
+  double value, vega;
+  gbs_value_vega(type, fs, x, t, r, b, v, value, vega);
+  double min_diff = std::abs(cp - value);
   int countr = 0;
-  while (precision <= std::abs(cp - g.value) && std::abs(cp - g.value) <= min_diff && countr < max_steps) {
-    if (std::abs(g.vega) < 1e-12) break;
-    v = v - (g.value - cp) / g.vega;
+  while (precision <= std::abs(cp - value) && std::abs(cp - value) <= min_diff && countr < max_steps) {
+    if (std::abs(vega) < 1e-12) break;
+    v = v - (value - cp) / vega;
     if (v > MAX_V || v < MIN_V) break;
-    g = gbs(type, fs, x, t, r, b, v);
-    min_diff = std::min(std::abs(cp - g.value), min_diff);
+    gbs_value_vega(type, fs, x, t, r, b, v, value, vega);
+    min_diff = std::min(std::abs(cp - value), min_diff);
     ++countr;
   }
-  if (std::abs(cp - g.value) < precision) return v;
+  if (std::abs(cp - value) < precision) return v;
   return bisection_implied_vol(type, fs, x, t, r, b, cp, precision, max_steps);
 }
 

@@ -12,9 +12,11 @@ bool is_monthly_expiration(Date exp) {
 }
 
 std::vector<Date> available_expirations(const OptionsDataset& ds, Date as_of) {
-  auto exps = ds.expirations(as_of);
+  auto it = ds.day_exps.find(as_of);
+  if (it == ds.day_exps.end()) return {};
   std::vector<Date> out;
-  for (Date e : exps) if (e >= as_of) out.push_back(e);
+  out.reserve(it->second.size());
+  for (Date e : it->second) if (e >= as_of) out.push_back(e);
   return out;
 }
 
@@ -46,7 +48,10 @@ std::pair<Date, Date> bracketing_expirations(const OptionsDataset& ds, Date as_o
 }
 
 bool needs_synthetic_tenor(const OptionsDataset& ds, Date as_of, int target_dte, int tol) {
-  for (Date e : available_expirations(ds, as_of)) {
+  auto it = ds.day_exps.find(as_of);
+  if (it == ds.day_exps.end()) return true;
+  for (Date e : it->second) {
+    if (e < as_of) continue;
     if (std::abs(days_between(as_of, e) - target_dte) <= tol) return false;
   }
   return true;
@@ -65,10 +70,10 @@ static std::vector<std::pair<double, double>> chain_iv_by_moneyness(
   double r = get_risk_free_rate(as_of, t);
   double q = get_dividend_yield(as_of);
   double lo_k = spot * (1.0 - band), hi_k = spot * (1.0 + band);
-  auto b = ds.begin(as_of), e = ds.end(as_of);
+  auto [b, e] = ds.quotes_for(as_of, exp, type);
   if (!b) return pts;
+  pts.reserve(static_cast<size_t>(e - b));
   for (auto p = b; p != e; ++p) {
-    if (p->put_call != type || p->exp_date != exp) continue;
     if (p->strike < lo_k || p->strike > hi_k) continue;
     double mid = p->mid();
     if (mid <= 0 || !std::isfinite(mid)) continue;
@@ -79,7 +84,7 @@ static std::vector<std::pair<double, double>> chain_iv_by_moneyness(
       if (iv > 0 && std::isfinite(iv)) pts.push_back({p->strike / spot, iv});
     } catch (...) {}
   }
-  std::sort(pts.begin(), pts.end());
+  // quotes_for already returns strike-ascending order
   return pts;
 }
 
@@ -88,16 +93,18 @@ static double interp_iv_at_moneyness(const std::vector<std::pair<double, double>
   if (pts.empty()) return std::numeric_limits<double>::quiet_NaN();
   if (m <= pts.front().first) return pts.front().second;
   if (m >= pts.back().first) return pts.back().second;
-  for (size_t i = 1; i < pts.size(); ++i) {
-    if (pts[i - 1].first <= m && m <= pts[i].first) {
-      double m0 = pts[i - 1].first, m1 = pts[i].first;
-      double iv0 = pts[i - 1].second, iv1 = pts[i].second;
-      if (m1 == m0) return iv0;
-      double w = (m - m0) / (m1 - m0);
-      return iv0 * (1 - w) + iv1 * w;
-    }
-  }
-  return pts.back().second;
+  auto it = std::lower_bound(pts.begin(), pts.end(), m,
+                             [](const std::pair<double, double>& p, double mv) {
+                               return p.first < mv;
+                             });
+  if (it == pts.begin()) return pts.front().second;
+  auto prev = it - 1;
+  if (it == pts.end()) return pts.back().second;
+  double m0 = prev->first, m1 = it->first;
+  double iv0 = prev->second, iv1 = it->second;
+  if (m1 == m0) return iv0;
+  double w = (m - m0) / (m1 - m0);
+  return iv0 * (1 - w) + iv1 * w;
 }
 
 static double anchor_iv(const OptionsDataset& ds, OptType type, Date exp,
@@ -106,16 +113,19 @@ static double anchor_iv(const OptionsDataset& ds, OptType type, Date exp,
   double t = days / YEAR_FRAC;
   double r = get_risk_free_rate(as_of, t);
   double q = get_dividend_yield(as_of);
-  auto b = ds.begin(as_of), e = ds.end(as_of);
+  auto [b, e] = ds.quotes_for(as_of, exp, type);
   if (!b) return 0.20;
+
+  // Same selection as before (nearest strikes first), but only over this expiry.
   std::vector<std::pair<double, const OptionQuote*>> ranked;
-  for (auto p = b; p != e; ++p) {
-    if (p->put_call != type || p->exp_date != exp) continue;
+  ranked.reserve(static_cast<size_t>(e - b));
+  for (auto p = b; p != e; ++p)
     ranked.push_back({std::abs(p->strike - spot), p});
-  }
-  std::sort(ranked.begin(), ranked.end(),
-            [](auto& a, auto& b) { return a.first < b.first; });
-  for (size_t i = 0; i < ranked.size() && i < 16; ++i) {
+  size_t lim = std::min(ranked.size(), size_t(16));
+  std::partial_sort(
+      ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(lim), ranked.end(),
+      [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (size_t i = 0; i < lim; ++i) {
     auto* row = ranked[i].second;
     double mid = row->mid();
     if (mid <= 0) continue;
@@ -140,21 +150,20 @@ std::optional<double> interpolate_iv_for_dte(const OptionsDataset& ds, OptType t
   }
   if (!lo) return std::nullopt;
 
-  auto get_pts = [&](Date exp) {
+  IvCache local_iv;
+  IvCache* use_cache = cache ? cache : &local_iv;
+  auto get_pts = [&](Date exp) -> const std::vector<std::pair<double, double>>& {
     long long k = iv_key(type, exp);
-    if (cache) {
-      auto it = cache->find(k);
-      if (it != cache->end()) return it->second;
+    auto it = use_cache->find(k);
+    if (it == use_cache->end()) {
+      it = use_cache->emplace(k, chain_iv_by_moneyness(ds, type, exp, spot, as_of)).first;
     }
-    auto pts = chain_iv_by_moneyness(ds, type, exp, spot, as_of);
-    if (cache) (*cache)[k] = pts;
-    return pts;
+    return it->second;
   };
 
   double moneyness = strike / spot;
   double t_target = std::max(target_dte, 1) / YEAR_FRAC;
-  auto lo_pts = get_pts(lo);
-  double iv_lo = interp_iv_at_moneyness(lo_pts, moneyness);
+  double iv_lo = interp_iv_at_moneyness(get_pts(lo), moneyness);
   if (!std::isfinite(iv_lo)) return std::nullopt;
 
   if (!hi || hi == lo) {
@@ -165,8 +174,7 @@ std::optional<double> interpolate_iv_for_dte(const OptionsDataset& ds, OptType t
     return iv;
   }
 
-  auto hi_pts = get_pts(hi);
-  double iv_hi = interp_iv_at_moneyness(hi_pts, moneyness);
+  double iv_hi = interp_iv_at_moneyness(get_pts(hi), moneyness);
   if (!std::isfinite(iv_hi)) return iv_lo;
 
   double t_lo = std::max(days_between(as_of, lo), 1) / YEAR_FRAC;
@@ -193,24 +201,23 @@ std::optional<SyntheticQuote> synthetic_option_quote(
   double q = get_dividend_yield(as_of);
 
   // Exact listed
-  auto b = ds.begin(as_of), e = ds.end(as_of);
+  auto [b, e] = ds.quotes_for(as_of, target_exp, type);
   if (b) {
-    for (auto p = b; p != e; ++p) {
-      if (p->put_call == type && p->exp_date == target_exp &&
-          std::abs(p->strike - strike) < 1e-6) {
-        double mid = p->mid();
-        SyntheticQuote qte;
-        qte.bid = p->bid; qte.ask = p->ask; qte.mid = mid;
-        qte.strike = strike; qte.exp_date = target_exp; qte.data_date = as_of;
-        qte.underlying = spot; qte.put_call = type; qte.interpolated = false;
-        try {
-          auto san = sanitize_option_price_for_iv(type, spot, strike, t, r, q, mid);
-          double iv = san ? euro_implied_vol(type, spot, strike, t, r, q, *san) : 0.2;
-          auto g = merton(type, spot, strike, t, r, q, iv);
-          qte.implied_vol = iv; qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
-        } catch (...) {}
-        return qte;
-      }
+    auto it = std::lower_bound(
+        b, e, strike, [](const OptionQuote& row, double k) { return row.strike < k; });
+    if (it != e && std::abs(it->strike - strike) < 1e-6) {
+      double mid = it->mid();
+      SyntheticQuote qte;
+      qte.bid = it->bid; qte.ask = it->ask; qte.mid = mid;
+      qte.strike = strike; qte.exp_date = target_exp; qte.data_date = as_of;
+      qte.underlying = spot; qte.put_call = type; qte.interpolated = false;
+      try {
+        auto san = sanitize_option_price_for_iv(type, spot, strike, t, r, q, mid);
+        double iv = san ? euro_implied_vol(type, spot, strike, t, r, q, *san) : 0.2;
+        auto g = merton(type, spot, strike, t, r, q, iv);
+        qte.implied_vol = iv; qte.delta = g.delta; qte.gamma = g.gamma; qte.theta = g.theta;
+      } catch (...) {}
+      return qte;
     }
   }
 
@@ -220,9 +227,6 @@ std::optional<SyntheticQuote> synthetic_option_quote(
   if (!std::isfinite(g.value)) return std::nullopt;
   SyntheticQuote qte;
   qte.mid = g.value;
-  qte.bid = std::max(g.value * (1.0 - slip_pct), 0.0);
-  qte.ask = g.value * (1.0 + slip_pct);
-  // match Python: half = mid * slip; bid = mid - half
   double half = g.value * slip_pct;
   qte.bid = std::max(g.value - half, 0.0);
   qte.ask = g.value + half;
@@ -266,43 +270,47 @@ std::optional<SyntheticQuote> find_option_by_delta(
 
   struct Cand { double err; double k; double mid; };
   std::vector<Cand> ranked;
-  auto b = ds.begin(as_of), e = ds.end(as_of);
+  auto [b, e] = ds.quotes_for(as_of, nearest, type);
   if (!b) return std::nullopt;
-  for (auto p = b; p != e; ++p) {
-    if (p->put_call != type || p->exp_date != nearest) continue;
-    if (p->strike < lo_k || p->strike > hi_k) continue;
+  ranked.reserve(static_cast<size_t>(e - b));
+
+  auto consider = [&](const OptionQuote* p, bool enforce_otm) {
+    if (p->strike < lo_k || p->strike > hi_k) return;
     double mid = p->mid();
-    if (mid <= 0) continue;
-    if (prefer_otm) {
-      if (type == OptType::Call && p->strike < spot * 0.97) continue;
-      if (type == OptType::Put && p->strike > spot * 1.03) continue;
+    if (mid <= 0) return;
+    if (enforce_otm) {
+      if (type == OptType::Call && p->strike < spot * 0.97) return;
+      if (type == OptType::Put && p->strike > spot * 1.03) return;
     }
     try {
-      auto g = merton(type, spot, p->strike, t, r, q, anchor);
-      if (!std::isfinite(g.delta)) continue;
-      ranked.push_back({std::abs(g.delta - target_delta), p->strike, mid});
+      double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
+      if (!std::isfinite(delta)) return;
+      ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
     } catch (...) {}
-  }
+  };
+
+  for (auto p = b; p != e; ++p) consider(p, prefer_otm);
   if (ranked.empty()) {
     for (auto p = b; p != e; ++p) {
-      if (p->put_call != type || p->exp_date != nearest) continue;
       double mid = p->mid();
       if (mid <= 0) continue;
       try {
-        auto g = merton(type, spot, p->strike, t, r, q, anchor);
-        ranked.push_back({std::abs(g.delta - target_delta), p->strike, mid});
+        double delta = merton_delta(type, spot, p->strike, t, r, q, anchor);
+        ranked.push_back({std::abs(delta - target_delta), p->strike, mid});
       } catch (...) {}
     }
   }
   if (ranked.empty()) return std::nullopt;
-  std::sort(ranked.begin(), ranked.end(),
-            [](const Cand& a, const Cand& b) { return a.err < b.err; });
+
+  size_t n = std::min(ranked.size(), size_t(8));
+  std::partial_sort(ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(n),
+                    ranked.end(),
+                    [](const Cand& a, const Cand& b) { return a.err < b.err; });
 
   IvCache local;
   IvCache* use_cache = cache ? cache : &local;
   std::optional<SyntheticQuote> best;
   double best_err = 1e99;
-  size_t n = std::min(ranked.size(), size_t(8));
   for (size_t i = 0; i < n; ++i) {
     std::optional<SyntheticQuote> quote;
     if (need_interp) {

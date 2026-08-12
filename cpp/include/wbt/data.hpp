@@ -10,11 +10,17 @@ struct OptionsDataset {
   std::vector<OptionQuote> quotes;                 // all rows
   std::vector<Date> dates;                         // sorted unique DataDates
   std::unordered_map<Date, std::pair<size_t, size_t>> day_range;  // [begin,end)
+  // Unique expirations per session (ascending), built in rebuild_index.
+  std::unordered_map<Date, std::vector<Date>> day_exps;
 
   const OptionQuote* begin(Date d) const;
   const OptionQuote* end(Date d) const;
   double spot(Date d) const;
   std::vector<Date> expirations(Date d) const;
+  // Quotes for (session, expiry, put/call). Relies on sort order from loader:
+  // (data_date, exp_date, put_call, strike).
+  std::pair<const OptionQuote*, const OptionQuote*>
+  quotes_for(Date d, Date exp, OptType type) const;
 
   void rebuild_index();
 };

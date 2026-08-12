@@ -192,7 +192,7 @@ void close_all_options(const WParam& param, Date date, double spot, PositionsAnd
   stat.opt_list.clear();
 }
 
-void close_all_stock(const WParam& param, Date date, double spot, PositionsAndStats& stat) {
+void close_all_stock(const WParam& param, Date /*date*/, double spot, PositionsAndStats& stat) {
   double shares = stat.total_shares();
   if (std::abs(shares) < 1e-9) return;
   double stock_comm = param.fixed.stock_comm_per_share;
@@ -221,15 +221,14 @@ void close_all_stock(const WParam& param, Date date, double spot, PositionsAndSt
   }
 }
 
-std::pair<bool, const char*> should_roll(const WParam& param, Date date, double spot,
-                                         PositionsAndStats& stat) {
+std::pair<bool, const char*> should_roll(const WParam& param, Date date,
+                                         PositionsAndStats& stat, double pnl_pct) {
   if (stat.opt_list.empty()) return {false, ""};
   auto short_dte = stat.short_min_dte(date);
   if (param.enable_dte_roll && short_dte) {
     if (*short_dte <= param.roll_dte) return {true, "dte_roll"};
     if (param.roll_on_expiry && *short_dte <= 0) return {true, "expire"};
   }
-  double pnl_pct = stat.structure_pnl_pct(date, spot);
   if (param.enable_profit_take && pnl_pct >= param.profit_take_pct) return {true, "profit_take"};
   if (param.enable_loss_cut && pnl_pct <= -param.loss_cut_pct) return {true, "loss_cut"};
   return {false, ""};
@@ -247,16 +246,16 @@ void year_end_tax(const WParam& param, PositionsAndStats& stat) {
   stat.annual_capital_gain = 0;
 }
 
-void calc_drawdown(PositionsAndStats& stat, const std::string& date_str, double equity) {
+void calc_drawdown(PositionsAndStats& stat, Date date, double equity) {
   if (equity > stat.cur_peak) {
     stat.cur_peak = equity;
-    stat.cur_peak_date = date_str;
+    stat.cur_peak_date = format_date(date);
   }
   if (stat.cur_peak > 0) {
     double dd = (stat.cur_peak - equity) / stat.cur_peak * 100.0;
     if (dd > stat.max_drawdown) {
       stat.max_drawdown = dd;
-      stat.max_drawdown_peak_date = date_str;
+      stat.max_drawdown_peak_date = format_date(date);
     }
   }
 }
@@ -301,6 +300,7 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
   TradeLog* log = verbose ? &result.trades : nullptr;
 
   std::vector<double> spots;
+  if (param.eval_expected_pnl) spots.reserve(ds.dates.size());
   Date start = ds.dates.front();
   Date end = ds.dates.back();
   int prev_year = year_of(start);
@@ -308,13 +308,12 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
   for (size_t i = 0; i < ds.dates.size(); ++i) {
     Date date = ds.dates[i];
     double spot = ds.spot(date);
-    spots.push_back(spot);
-    std::string date_str = format_date(date);
+    if (param.eval_expected_pnl) spots.push_back(spot);
 
     if (i == 0) {
       stat.initial_price = spot;
       stat.cur_peak = stat.cash;
-      stat.cur_peak_date = date_str;
+      stat.cur_peak_date = format_date(date);
     }
     if (year_of(date) != prev_year) {
       year_end_tax(param, stat);
@@ -324,17 +323,26 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
     if (param.enable_gamma_scalp && !stat.opt_list.empty())
       update_greeks(date, spot, stat);
 
+    // Mark options once per day for roll check + equity (was duplicated).
+    double opt_nlv = 0.0;
     if (!stat.opt_list.empty()) {
-      auto [do_roll, reason] = should_roll(param, date, spot, stat);
+      for (const auto& opt : stat.opt_list)
+        opt_nlv += stat.mark_option(opt, date, spot) * opt.num_contracts * CONTRACT_SCALE;
+      double denom = std::abs(stat.structure_entry_cash);
+      if (denom < 1e-9) denom = 1.0;
+      double pnl_pct = (opt_nlv - stat.structure_entry_cash) / denom;
+      auto [do_roll, reason] = should_roll(param, date, stat, pnl_pct);
       if (do_roll) {
         close_all_options(param, date, spot, stat, reason, log);
         close_all_stock(param, date, spot, stat);
         ++stat.num_rolls;
         open_w_structure(param, date, ds, stat, log);
+        opt_nlv = stat.option_nlv(date, spot);
       }
-      // gamma scalp omitted when disabled (default for parity tests)
     } else {
       open_w_structure(param, date, ds, stat, log);
+      if (!stat.opt_list.empty())
+        opt_nlv = stat.option_nlv(date, spot);
     }
 
     if (param.eval_expected_pnl && i % 5 == 0 && !stat.opt_list.empty()) {
@@ -347,8 +355,8 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
       stat.last_expected_pnl = exp;
     }
 
-    auto [nlv, _] = stat.get_balance(date, spot);
-    calc_drawdown(stat, date_str, nlv + stat.cash);
+    double nlv = stat.total_shares() * spot + opt_nlv;
+    calc_drawdown(stat, date, nlv + stat.cash);
   }
 
   Date last = ds.dates.back();
