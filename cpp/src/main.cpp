@@ -33,13 +33,26 @@ static void usage(const char* argv0) {
     "  --long-dte N             Target DTE for long (wing) legs (default 60)\n"
     "  --short-delta X          |delta| target for short legs (default 0.40)\n"
     "  --long-delta X           |delta| target for long wings (default 0.10)\n"
-    "  --units N                Structure multiplier (default 1)\n"
+    "  --units N                Structure multiplier (default 1;\n"
+    "                           ignored when --long-pos-mil > 0)\n"
     "  --m-call N               Fixed-mode long-call wing count (default 2)\n"
     "  --m-put N                Fixed-mode long-put wing count (default 2)\n"
-    "  --balance X              Starting cash (default 1e6)\n"
+    "  --balance X              Options-book starting cash (default 1e6)\n"
+    "  --long-pos-mil X         Buy-and-hold overlay in $millions (default 0).\n"
+    "                           Buys X*1e6 notional of the symbol on day 1;\n"
+    "                           NLV/MaxDD = W-strategy + long stock.\n"
+    "  --hedge-ratio X          Net long puts protect X × long-pos contracts\n"
+    "                           (shares/100). Only with long-pos-mil > 0.\n"
+    "  --call-put-ratio-pct X   Call contracts as % of puts (default 100).\n"
+    "                           20 → calls are 20% of puts (−100/+200 puts\n"
+    "                           → −20/+40 calls).\n"
     "  --commission X           Option commission $/contract (default 1.7125)\n"
     "  --slippage-pct X         Option slippage as percent of mid;\n"
     "                           e.g. 5 means 5% (default 5)\n"
+    "  --lt-tax-pct X           Long-term capital-gain tax % (holding > 1y).\n"
+    "                           Default 37.1\n"
+    "  --st-tax-pct X           Short-term capital-gain tax % (holding <= 1y).\n"
+    "                           Default 54.1\n"
     "\n"
     "Exit / roll:\n"
     "  --roll-dte N             Roll when short DTE <= N (default 0)\n"
@@ -53,7 +66,7 @@ static void usage(const char* argv0) {
     "Other:\n"
     "  --gamma-scalp / --no-gamma-scalp\n"
     "  --no-expected-pnl\n"
-    "  --verbose                Record every option open/close to CSV\n"
+    "  --verbose                Record every option/stock fill to CSV\n"
     "  --verbose-out <path>     Verbose CSV path (implies --verbose;\n"
     "                           default transactions.csv)\n"
     "  --bench N                Repeat backtest N times for timing\n"
@@ -61,14 +74,17 @@ static void usage(const char* argv0) {
 }
 
 static void write_trades_csv(const std::string& path,
-                             const std::vector<TradeRecord>& trades) {
+                             const std::vector<TradeRecord>& trades,
+                             double hedge_ratio, double call_put_ratio_pct) {
   std::ofstream out(path);
   if (!out) {
     std::cerr << "Failed to write verbose CSV: " << path << "\n";
     return;
   }
-  out << "date,action,structureId,leg,type,strike,expiry,contracts,"
-         "openPrice,closePrice,pnl,reason,spot\n";
+  out << "date,action,structureId,leg,type,strike,expiry,contracts,shares,"
+         "openPrice,closePrice,pnl,reason,spot,hedgeRatio,callPutRatioPct,"
+         "bhShares,totalTax,stLossCarry,ltLossCarry,stGain,ltGain,"
+         "cash,stockNlv,totalNlv,costBasis,tradeStGain,tradeLtGain\n";
   out << std::fixed << std::setprecision(6);
   for (const auto& t : trades) {
     out << format_date(t.date) << ','
@@ -76,14 +92,30 @@ static void write_trades_csv(const std::string& path,
         << t.structure_id << ','
         << t.leg_role << ','
         << t.put_call << ','
-        << t.strike << ','
-        << format_date(t.exp_date) << ','
+        << t.strike << ',';
+    if (t.exp_date) out << format_date(t.exp_date);
+    out << ','
         << t.num_contracts << ','
+        << t.shares << ','
         << t.open_price << ','
         << t.close_price << ','
         << t.pnl << ','
         << t.reason << ','
-        << t.spot << '\n';
+        << t.spot << ','
+        << hedge_ratio << ','
+        << call_put_ratio_pct << ','
+        << t.bh_shares << ','
+        << t.total_tax << ','
+        << t.st_loss_carryover << ','
+        << t.lt_loss_carryover << ','
+        << t.st_capital_gain << ','
+        << t.lt_capital_gain << ','
+        << t.cash << ','
+        << t.stock_nlv << ','
+        << t.total_nlv << ','
+        << t.cost_basis << ','
+        << t.trade_st_gain << ','
+        << t.trade_lt_gain << '\n';
   }
 }
 
@@ -118,10 +150,19 @@ int main(int argc, char** argv) {
     else if (eq("--long-delta")) param.long_delta = std::atof(need());
     else if (eq("--units")) param.units = std::atoi(need());
     else if (eq("--balance")) param.fixed.initial_balance = std::atof(need());
+    else if (eq("--long-pos-mil") || eq("--long-pos"))
+      param.long_pos_mil = std::atof(need());
+    else if (eq("--hedge-ratio")) param.hedge_ratio = std::atof(need());
+    else if (eq("--call-put-ratio-pct"))
+      param.call_put_ratio_pct = std::atof(need());
     else if (eq("--commission"))
       param.fixed.opt_comm_per_contract = std::atof(need());
     else if (eq("--slippage-pct"))
       param.fixed.opt_slippage_percent = std::atof(need()) / 100.0;
+    else if (eq("--lt-tax-pct") || eq("--long-term-tax-pct"))
+      param.fixed.long_term_tax = std::atof(need()) / 100.0;
+    else if (eq("--st-tax-pct") || eq("--short-term-tax-pct"))
+      param.fixed.short_term_tax = std::atof(need()) / 100.0;
     else if (eq("--m-call")) param.m_call = std::atof(need());
     else if (eq("--m-put")) param.m_put = std::atof(need());
     else if (eq("--roll-dte")) param.roll_dte = std::atoi(need());
@@ -196,6 +237,15 @@ int main(int argc, char** argv) {
   }
   ensure_iv_smile_csv(ds, iv_smile_path, 0.45);
 
+  if (param.long_pos_mil > 0 && !(param.hedge_ratio > 0)) {
+    std::cerr << "error: --hedge-ratio must be > 0 when --long-pos-mil > 0\n";
+    return 1;
+  }
+  if (!(param.call_put_ratio_pct > 0)) {
+    std::cerr << "error: --call-put-ratio-pct must be > 0\n";
+    return 1;
+  }
+
   // Verbose trade log is only needed on the last (or sole) run.
   BacktestResult last;
   auto t0 = std::chrono::steady_clock::now();
@@ -207,13 +257,24 @@ int main(int argc, char** argv) {
   double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
   if (verbose) {
-    write_trades_csv(verbose_out, last.trades);
+    const double hr = param.long_pos_mil > 0 ? param.hedge_ratio : 0.0;
+    write_trades_csv(verbose_out, last.trades, hr, param.call_put_ratio_pct);
     std::cerr << "Wrote " << last.trades.size() << " trades to " << verbose_out << "\n";
   }
 
+  if (param.long_pos_mil > 0) {
+    std::cout << "baselineAnnualReturn=" << last.baseline_annual_return
+              << " baselineMaxDrawdown=" << last.baseline_max_drawdown
+              << " baselineFinalNLV=" << last.baseline_final_nlv
+              << " longPosShares=" << last.long_pos_shares
+              << " hedgeRatio=" << param.hedge_ratio
+              << " unitsUsed=" << last.units_used << "\n";
+  }
   std::cout << "annualReturn=" << last.annual_return
             << " maxDrawdown=" << last.max_drawdown
             << " finalNLV=" << last.final_nlv
+            << " totalTax=" << last.total_tax
+            << " taxPct=" << tax_pct_of_nlv(last.total_tax, last.final_nlv)
             << " numRolls=" << last.num_rolls
             << " elapsed_ms=" << (ms / bench)
             << " (bench=" << bench << ")\n";

@@ -6,7 +6,9 @@
 #   ./run_cpp_search.sh NVDA GOOG    # only listed symbols
 #
 # Symbols: SPX QQQ AAPL (START→END window), NVDA GOOG AVGO (full history).
-# Env overrides: OPTIONS_DATA YIELD START END EVERY_N ATM_BAND UNITS WORKERS BUILD_DIR LOG TOP10_OUT
+# Env overrides: OPTIONS_DATA YIELD START END EVERY_N ATM_BAND UNITS
+#   LONG_POS_MIL HEDGE_RATIOS CALL_PUT_RATIO_PCTS LT_TAX_PCT ST_TAX_PCT
+#   WORKERS BUILD_DIR LOG TOP10_OUT
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -19,6 +21,11 @@ END="${END:-2023-12-31}"
 EVERY_N="${EVERY_N:-5}"
 ATM_BAND="${ATM_BAND:-0.20}"
 UNITS="${UNITS:-10}"
+LONG_POS_MIL="${LONG_POS_MIL:-10}"
+HEDGE_RATIOS="${HEDGE_RATIOS:-0.5,1,1.5,2}"
+CALL_PUT_RATIO_PCTS="${CALL_PUT_RATIO_PCTS:-100,50,25}"
+LT_TAX_PCT="${LT_TAX_PCT:-37.1}"
+ST_TAX_PCT="${ST_TAX_PCT:-54.1}"
 WORKERS="${WORKERS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 8)}"
 BUILD_DIR="${BUILD_DIR:-$ROOT/cpp/build}"
 LOG="${LOG:-$ROOT/cpp-search-${START}-${END}.log}"
@@ -143,7 +150,12 @@ TOP10_HEADER_WRITTEN=0
 
 echo "Logging to $LOG"
 echo "Window $START → $END (windowed symbols); full-history symbols use entire file"
-echo "every_n=$EVERY_N  workers=$WORKERS  units=$UNITS"
+echo "every_n=$EVERY_N  workers=$WORKERS  units=$UNITS  long_pos_mil=$LONG_POS_MIL"
+if [[ "$LONG_POS_MIL" != "0" ]]; then
+  echo "hedge_ratios=$HEDGE_RATIOS"
+fi
+echo "lt_tax_pct=$LT_TAX_PCT  st_tax_pct=$ST_TAX_PCT"
+echo "call_put_ratio_pcts=$CALL_PUT_RATIO_PCTS"
 echo "Symbols: $(printf '%s ' "${SELECTED[@]%%|*}")"
 echo "Top-10 combined → $TOP10_OUT"
 
@@ -194,13 +206,21 @@ for job in "${SELECTED[@]}"; do
   echo "dates=$RUN_START → $RUN_END" | tee -a "$LOG"
   echo "iv-smile=$(dirname "$INPUT")/${SYM}-ivsmile.csv (default beside data)" | tee -a "$LOG"
   SYM_T0=$(date +%s)
-  "$W_SEARCH" --symbol "$SYM" \
-    -i "$INPUT" -y "$YIELD" \
-    --cache "$CACHE" \
-    --start-date "$RUN_START" --end-date "$RUN_END" \
-    --every-n "$EVERY_N" --atm-band "$ATM_BAND" \
-    --units "$UNITS" --workers "$WORKERS" \
-    --out "$OUT" 2>&1 | tee -a "$LOG"
+  SEARCH_ARGS=(
+    --symbol "$SYM"
+    -i "$INPUT" -y "$YIELD"
+    --cache "$CACHE"
+    --start-date "$RUN_START" --end-date "$RUN_END"
+    --every-n "$EVERY_N" --atm-band "$ATM_BAND"
+    --units "$UNITS" --workers "$WORKERS"
+    --lt-tax-pct "$LT_TAX_PCT" --st-tax-pct "$ST_TAX_PCT"
+    --call-put-ratio-pcts "$CALL_PUT_RATIO_PCTS"
+    --out "$OUT"
+  )
+  if [[ "$LONG_POS_MIL" != "0" ]]; then
+    SEARCH_ARGS+=(--long-pos-mil "$LONG_POS_MIL" --hedge-ratios "$HEDGE_RATIOS")
+  fi
+  "$W_SEARCH" "${SEARCH_ARGS[@]}" 2>&1 | tee -a "$LOG"
   SYM_T1=$(date +%s)
   SYM_SEC=$((SYM_T1 - SYM_T0))
   RUNTIMES+=("$SYM|$SYM_SEC|$OUT")

@@ -34,6 +34,8 @@ struct SearchConfig {
   double theta_threshold = 0.0;
   int max_wing_mult = 4;
   int units = 10;
+  double hedge_ratio = 0;  // 0 = unused (size via units)
+  double call_put_ratio_pct = 100;  // calls as % of puts (100 = equal)
   int roll_dte = 0;
   bool roll_on_expiry = true;
   bool enable_dte_roll = true;
@@ -60,12 +62,15 @@ const char* wing_name(WingMode m) {
 }
 
 WParam to_param(const SearchConfig& c, double balance, const std::string& symbol,
-                double opt_comm, double opt_slip) {
+                double opt_comm, double opt_slip, double long_pos_mil,
+                double lt_tax, double st_tax) {
   WParam p;
   p.fixed.initial_balance = balance;
   p.fixed.symbol = symbol;
   p.fixed.opt_comm_per_contract = opt_comm;
   p.fixed.opt_slippage_percent = opt_slip;
+  p.fixed.long_term_tax = lt_tax;
+  p.fixed.short_term_tax = st_tax;
   p.short_dte = c.short_dte;
   p.long_dte = c.long_dte;
   p.short_delta = c.short_delta;
@@ -75,6 +80,9 @@ WParam to_param(const SearchConfig& c, double balance, const std::string& symbol
   p.m_call = c.m_call;
   p.m_put = c.m_put;
   p.units = c.units;
+  p.long_pos_mil = long_pos_mil;
+  p.hedge_ratio = c.hedge_ratio;
+  p.call_put_ratio_pct = c.call_put_ratio_pct;
   p.wing_mode = c.wing_mode;
   p.credit_buffer = c.credit_buffer;
   p.theta_threshold = c.theta_threshold;
@@ -123,17 +131,22 @@ struct GridSpec {
   std::vector<double> long_deltas = {0.08, 0.12};
   // fixed(ratio>1), credit, theta — long wings must outnumber short body.
   std::vector<WingSpec> wings = {
+    {WingMode::Fixed, 1.6, 0.02, 0.0, 4},
     {WingMode::Fixed, 1.8, 0.02, 0.0, 4},
     {WingMode::Fixed, 2.0, 0.02, 0.0, 4},
     {WingMode::Fixed, 2.2, 0.02, 0.0, 4},
+    {WingMode::Fixed, 2.4, 0.02, 0.0, 4},
     {WingMode::Credit, 2.0, 0.02, 0.0, 4},
     {WingMode::Theta, 2.0, 0.02, 0.0, 4},
-    {WingMode::Theta, 2.0, 0.02, 0.1, 4},
   };
   // -1 in profit_takes / loss_cuts means that exit path is disabled
   std::vector<int> roll_dtes = {0};
-  std::vector<double> profit_takes = {-1.0, 3, 5};
+  std::vector<double> profit_takes = {-1.0, 5};
   std::vector<double> loss_cuts = {-1.0};
+  // Only used when long_pos_mil > 0; otherwise grid uses a single 0 entry.
+  std::vector<double> hedge_ratios = {0.5, 1.0, 1.5, 2.0};
+  // Calls as a percent of puts (100 = equal, 50 = half, 25 = quarter).
+  std::vector<double> call_put_ratio_pcts = {100.0, 50.0, 25.0};
 };
 
 std::vector<std::string> split_csv(const std::string& s) {
@@ -154,6 +167,12 @@ std::vector<std::string> split_csv(const std::string& s) {
 std::vector<int> parse_ints(const std::string& s) {
   std::vector<int> out;
   for (auto& t : split_csv(s)) out.push_back(std::atoi(t.c_str()));
+  return out;
+}
+
+std::vector<double> parse_doubles(const std::string& s) {
+  std::vector<double> out;
+  for (auto& t : split_csv(s)) out.push_back(std::atof(t.c_str()));
   return out;
 }
 
@@ -198,8 +217,14 @@ std::vector<WingSpec> parse_wings(const std::string& s) {
   return out;
 }
 
-std::vector<SearchConfig> build_grid(const GridSpec& g, int units) {
+std::vector<SearchConfig> build_grid(const GridSpec& g, int units,
+                                     double long_pos_mil) {
   std::vector<SearchConfig> out;
+  // When no long overlay, hedge_ratio is unused — single sentinel 0.
+  std::vector<double> hedge_ratios =
+      long_pos_mil > 0 ? g.hedge_ratios : std::vector<double>{0.0};
+  if (hedge_ratios.empty()) hedge_ratios = {0.0};
+
   for (int sd : g.short_dtes) {
     for (int ld : g.long_dtes) {
       if (ld < sd) continue;
@@ -214,29 +239,36 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units) {
                 (w.mode == WingMode::Credit || w.mode == WingMode::Theta)) {
               continue;
             }
-            for (int rd : g.roll_dtes) {
-              for (double pt : g.profit_takes) {
-                for (double lc : g.loss_cuts) {
-                  SearchConfig c;
-                  c.short_dte = sd;
-                  c.long_dte = ld;
-                  c.short_delta = sdel;
-                  c.long_delta = ldel;
-                  c.wing_mode = w.mode;
-                  c.m_call = w.mode == WingMode::Fixed ? w.long_short_ratio : 2.0;
-                  c.m_put = c.m_call;
-                  c.credit_buffer = w.credit_buffer;
-                  c.theta_threshold = w.theta_threshold;
-                  c.max_wing_mult = w.max_wing_mult;
-                  c.units = units;
-                  c.roll_dte = rd;
-                  c.roll_on_expiry = true;
-                  c.enable_dte_roll = true;
-                  c.enable_profit_take = pt > 0;
-                  c.profit_take_pct = pt > 0 ? pt : 0.50;
-                  c.enable_loss_cut = lc > 0;
-                  c.loss_cut_pct = lc > 0 ? lc : 1.00;
-                  out.push_back(c);
+            for (double hr : hedge_ratios) {
+              for (double cp : g.call_put_ratio_pcts) {
+                if (!(cp > 0)) continue;
+                for (int rd : g.roll_dtes) {
+                  for (double pt : g.profit_takes) {
+                    for (double lc : g.loss_cuts) {
+                      SearchConfig c;
+                      c.short_dte = sd;
+                      c.long_dte = ld;
+                      c.short_delta = sdel;
+                      c.long_delta = ldel;
+                      c.wing_mode = w.mode;
+                      c.m_call = w.mode == WingMode::Fixed ? w.long_short_ratio : 2.0;
+                      c.m_put = c.m_call;
+                      c.credit_buffer = w.credit_buffer;
+                      c.theta_threshold = w.theta_threshold;
+                      c.max_wing_mult = w.max_wing_mult;
+                      c.units = units;
+                      c.hedge_ratio = hr;
+                      c.call_put_ratio_pct = cp;
+                      c.roll_dte = rd;
+                      c.roll_on_expiry = true;
+                      c.enable_dte_roll = true;
+                      c.enable_profit_take = pt > 0;
+                      c.profit_take_pct = pt > 0 ? pt : 0.50;
+                      c.enable_loss_cut = lc > 0;
+                      c.loss_cut_pct = lc > 0 ? lc : 1.00;
+                      out.push_back(c);
+                    }
+                  }
                 }
               }
             }
@@ -265,7 +297,7 @@ std::string format_duration(double sec) {
   return os.str();
 }
 
-void print_grid(const GridSpec& g, size_t n) {
+void print_grid(const GridSpec& g, size_t n, double long_pos_mil) {
   auto join_i = [](const std::vector<int>& v) {
     std::ostringstream os;
     for (size_t i = 0; i < v.size(); ++i) {
@@ -299,7 +331,12 @@ void print_grid(const GridSpec& g, size_t n) {
             << "  rollDTE={" << join_i(g.roll_dtes) << "}\n"
             << "  profitTake={" << join_d(g.profit_takes) << "}\n"
             << "  lossCut={" << join_d(g.loss_cuts) << "}\n"
-            << "  (DTE roll + expiry always on)\n";
+            << "  callPutRatioPct={" << join_d(g.call_put_ratio_pcts) << "}\n";
+  if (long_pos_mil > 0) {
+    std::cerr << "  longPosMil=" << long_pos_mil
+              << "  hedgeRatio={" << join_d(g.hedge_ratios) << "}\n";
+  }
+  std::cerr << "  (DTE roll + expiry always on)\n";
 }
 
 OptionsDataset ensure_cache(const std::string& csv_path, const std::string& cache_path,
@@ -318,14 +355,18 @@ OptionsDataset ensure_cache(const std::string& csv_path, const std::string& cach
   return ds;
 }
 
-void write_csv(const std::string& path, std::vector<SearchResult>& rows) {
+void write_csv(const std::string& path, std::vector<SearchResult>& rows,
+               double long_pos_mil) {
   std::sort(rows.begin(), rows.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
   std::ofstream out(path);
   out << "shortDTE,longDTE,shortDelta,longDelta,wingMode,mCall,mPut,"
          "creditBuffer,thetaThreshold,maxWingMult,rollDTE,rollOnExpiry,"
          "enableDteRoll,enableProfitTake,profitTakePct,enableLossCut,lossCutPct,"
-         "units,annualReturn,maxDrawdown,score,finalNLV,numRolls,elapsedSec\n";
+         "units,hedgeRatio,callPutRatioPct,longPosMil,annualReturn,maxDrawdown,score,finalNLV,"
+         "totalTax,taxPct,"
+         "baselineAnnualReturn,baselineMaxDrawdown,baselineFinalNLV,"
+         "longPosShares,unitsUsed,numRolls,elapsedSec\n";
   out << std::fixed << std::setprecision(6);
   for (auto& r : rows) {
     out << r.cfg.short_dte << ',' << r.cfg.long_dte << ','
@@ -338,9 +379,15 @@ void write_csv(const std::string& path, std::vector<SearchResult>& rows) {
         << (r.cfg.enable_dte_roll ? 1 : 0) << ','
         << (r.cfg.enable_profit_take ? 1 : 0) << ',' << r.cfg.profit_take_pct << ','
         << (r.cfg.enable_loss_cut ? 1 : 0) << ',' << r.cfg.loss_cut_pct << ','
-        << r.cfg.units << ','
+        << r.cfg.units << ',' << r.cfg.hedge_ratio << ','
+        << r.cfg.call_put_ratio_pct << ',' << long_pos_mil << ','
         << r.bt.annual_return << ',' << r.bt.max_drawdown << ',' << r.score << ','
-        << r.bt.final_nlv << ',' << r.bt.num_rolls << ','
+        << r.bt.final_nlv << ','
+        << r.bt.total_tax << ','
+        << tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv) << ','
+        << r.bt.baseline_annual_return << ',' << r.bt.baseline_max_drawdown << ','
+        << r.bt.baseline_final_nlv << ',' << r.bt.long_pos_shares << ','
+        << r.bt.units_used << ',' << r.bt.num_rolls << ','
         << std::setprecision(2) << r.elapsed_sec << std::setprecision(6) << '\n';
   }
 }
@@ -356,10 +403,23 @@ void usage(const char* argv0) {
     << "  --end-date YYYY-MM-DD\n"
     << "  --every-n N            Session thinning (default 5)\n"
     << "  --atm-band X           Strike band around spot (default 0.20)\n"
-    << "  --units N              (default 10)\n"
-    << "  --balance X\n"
+    << "  --units N              (default 10; ignored when --long-pos-mil > 0)\n"
+    << "  --balance X            Options-book starting cash (default 1e6)\n"
+    << "  --long-pos-mil X       Buy-and-hold overlay in $millions (default 0).\n"
+    << "                         Starts with X*1e6 cash, buys that notional of\n"
+    << "                         the symbol on day 1, holds to end. NLV/MaxDD\n"
+    << "                         are W-strategy + long stock. Prints B&H baseline.\n"
+    << "  --hedge-ratio X        Single hedge ratio (only with long-pos). Net long\n"
+    << "                         puts protect X × long-pos contracts (shares/100).\n"
+    << "  --hedge-ratios a,b,..  Grid of hedge ratios (default 0.5,1,1.5,2 when\n"
+    << "                         long-pos-mil > 0)\n"
+    << "  --call-put-ratio-pct X Calls as % of puts (100 = equal). Single value.\n"
+    << "  --call-put-ratio-pcts a,b,..  Grid (default 100,50,25). E.g. 20 means\n"
+    << "                         calls are 20% of puts (−100/+200 puts → −20/+40 calls).\n"
     << "  --commission X         Option commission $/contract (default 1.7125)\n"
     << "  --slippage-pct X       Option slippage % of mid; 5 = 5% (default 5)\n"
+    << "  --lt-tax-pct X         Long-term capital-gain tax % (default 37.1)\n"
+    << "  --st-tax-pct X         Short-term capital-gain tax % (default 54.1)\n"
     << "  --workers N            Threads (default hw concurrency)\n"
     << "  --out results.csv\n"
     << "  --limit N              Debug: only first N configs\n"
@@ -372,7 +432,8 @@ void usage(const char* argv0) {
     << "  --wings fixed:2,fixed:1.3,credit,theta\n"
     << "  --roll-dtes 0\n"
     << "  --profit-takes off,0.75\n"
-    << "  --loss-cuts off\n";
+    << "  --loss-cuts off\n"
+    << "  --call-put-ratio-pcts 100,50,25\n";
 }
 
 }  // namespace
@@ -386,8 +447,12 @@ int main(int argc, char** argv) {
   double atm_band = 0.20;
   int units = 10;
   double balance = 1e6;
+  double long_pos_mil = 0;
+  bool hedge_ratios_set = false;
   double opt_comm = 1.7125;
   double opt_slip = 0.05;  // decimal; CLI --slippage-pct is percent (5 → 0.05)
+  double lt_tax = FixedParam{}.long_term_tax;
+  double st_tax = FixedParam{}.short_term_tax;
   int workers = static_cast<int>(std::thread::hardware_concurrency());
   if (workers <= 0) workers = 4;
   int limit = 0;
@@ -411,8 +476,21 @@ int main(int argc, char** argv) {
       else if (eq("--atm-band")) atm_band = std::atof(need());
       else if (eq("--units")) units = std::atoi(need());
       else if (eq("--balance")) balance = std::atof(need());
+      else if (eq("--long-pos-mil") || eq("--long-pos"))
+        long_pos_mil = std::atof(need());
+      else if (eq("--hedge-ratio")) {
+        grid_spec.hedge_ratios = {std::atof(need())};
+        hedge_ratios_set = true;
+      } else if (eq("--hedge-ratios")) {
+        grid_spec.hedge_ratios = parse_doubles(need());
+        hedge_ratios_set = true;
+      }
       else if (eq("--commission")) opt_comm = std::atof(need());
       else if (eq("--slippage-pct")) opt_slip = std::atof(need()) / 100.0;
+      else if (eq("--lt-tax-pct") || eq("--long-term-tax-pct"))
+        lt_tax = std::atof(need()) / 100.0;
+      else if (eq("--st-tax-pct") || eq("--short-term-tax-pct"))
+        st_tax = std::atof(need()) / 100.0;
       else if (eq("--workers")) workers = std::atoi(need());
       else if (eq("--out")) out_path = need();
       else if (eq("--limit")) limit = std::atoi(need());
@@ -424,6 +502,8 @@ int main(int argc, char** argv) {
       else if (eq("--roll-dtes")) grid_spec.roll_dtes = parse_ints(need());
       else if (eq("--profit-takes")) grid_spec.profit_takes = parse_doubles_or_off(need());
       else if (eq("--loss-cuts")) grid_spec.loss_cuts = parse_doubles_or_off(need());
+      else if (eq("--call-put-ratio-pct") || eq("--call-put-ratio-pcts"))
+        grid_spec.call_put_ratio_pcts = parse_doubles(need());
       else if (eq("-h") || eq("--help")) { usage(argv[0]); return 0; }
       else {
         std::cerr << "Unknown arg " << argv[i] << "\n";
@@ -442,9 +522,30 @@ int main(int argc, char** argv) {
   if (grid_spec.short_dtes.empty() || grid_spec.long_dtes.empty() ||
       grid_spec.short_deltas.empty() || grid_spec.long_deltas.empty() ||
       grid_spec.wings.empty() || grid_spec.roll_dtes.empty() ||
-      grid_spec.profit_takes.empty() || grid_spec.loss_cuts.empty()) {
+      grid_spec.profit_takes.empty() || grid_spec.loss_cuts.empty() ||
+      grid_spec.call_put_ratio_pcts.empty()) {
     std::cerr << "Grid dimension cannot be empty\n";
     return 1;
+  }
+  for (double cp : grid_spec.call_put_ratio_pcts) {
+    if (!(cp > 0)) {
+      std::cerr << "call-put-ratio-pct values must be > 0\n";
+      return 1;
+    }
+  }
+  if (long_pos_mil > 0) {
+    if (grid_spec.hedge_ratios.empty()) {
+      std::cerr << "hedge_ratios cannot be empty when long-pos-mil > 0\n";
+      return 1;
+    }
+    for (double hr : grid_spec.hedge_ratios) {
+      if (!(hr > 0)) {
+        std::cerr << "hedge_ratio values must be > 0\n";
+        return 1;
+      }
+    }
+  } else if (hedge_ratios_set) {
+    std::cerr << "warning: --hedge-ratio(s) ignored when --long-pos-mil is 0\n";
   }
   if (workers <= 0) workers = 1;
   if (cache_path.empty()) {
@@ -463,14 +564,27 @@ int main(int argc, char** argv) {
   // Always load or build IV smiles beside the options data (or --iv-smile override).
   ensure_iv_smile_csv(ds, iv_smile_path, 0.45);
 
-  auto grid = build_grid(grid_spec, units);
+  auto grid = build_grid(grid_spec, units, long_pos_mil);
   if (limit > 0 && static_cast<int>(grid.size()) > limit)
     grid.resize(static_cast<size_t>(limit));
 
   std::cerr << "=== " << symbol << " search: " << grid.size()
             << " configs, " << workers << " workers, days=" << ds.dates.size()
             << " rows=" << ds.quotes.size() << " ===\n";
-  print_grid(grid_spec, grid.size());
+  print_grid(grid_spec, grid.size(), long_pos_mil);
+
+  // Print buy-and-hold baseline once (same for every config).
+  if (long_pos_mil > 0) {
+    BacktestResult base;
+    buy_and_hold_baseline(ds, long_pos_mil, FixedParam{}.stock_comm_per_share,
+                          base);
+    std::cerr << std::fixed << std::setprecision(2)
+              << "Baseline buy-and-hold (" << long_pos_mil << "M "
+              << symbol << "): annual=" << base.baseline_annual_return
+              << "%  maxDD=" << base.baseline_max_drawdown
+              << "%  finalNLV=" << base.baseline_final_nlv
+              << "  shares=" << base.long_pos_shares << "\n";
+  }
 
   std::vector<SearchResult> results(grid.size());
   std::atomic<size_t> next{0};
@@ -484,7 +598,8 @@ int main(int argc, char** argv) {
       size_t i = next.fetch_add(1);
       if (i >= grid.size()) break;
       auto cfg = grid[i];
-      auto param = to_param(cfg, balance, symbol, opt_comm, opt_slip);
+      auto param = to_param(cfg, balance, symbol, opt_comm, opt_slip, long_pos_mil,
+                            lt_tax, st_tax);
       auto t1 = std::chrono::steady_clock::now();
       auto bt = w_strategy(ds, param, false);
       auto t2 = std::chrono::steady_clock::now();
@@ -520,7 +635,7 @@ int main(int argc, char** argv) {
   for (auto& th : threads) th.join();
 
   auto t_end = std::chrono::steady_clock::now();
-  write_csv(out_path, results);
+  write_csv(out_path, results, long_pos_mil);
 
   double total_sec = std::chrono::duration<double>(t_end - t0).count();
   std::cerr << "\nDone in " << format_duration(total_sec) << "  wrote "
@@ -529,11 +644,17 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < results.size() && i < 10; ++i) {
     auto& r = results[i];
     std::cerr << "  score=" << r.score << " ret=" << r.bt.annual_return
-              << "% dd=" << r.bt.max_drawdown << "% | sDTE=" << r.cfg.short_dte
+              << "% dd=" << r.bt.max_drawdown << "% tax="
+              << tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv) << "%NLV"
+              << " | sDTE=" << r.cfg.short_dte
               << " lDTE=" << r.cfg.long_dte << " sΔ=" << r.cfg.short_delta
               << " lΔ=" << r.cfg.long_delta << " wing=" << wing_name(r.cfg.wing_mode)
               << " M=" << r.cfg.m_call
-              << " rollDTE=" << r.cfg.roll_dte
+              << " c/p=" << r.cfg.call_put_ratio_pct << "%";
+    if (long_pos_mil > 0)
+      std::cerr << " hedge=" << r.cfg.hedge_ratio
+                << " unitsUsed=" << r.bt.units_used;
+    std::cerr << " rollDTE=" << r.cfg.roll_dte
               << " pt=" << (r.cfg.enable_profit_take
                                 ? std::to_string(r.cfg.profit_take_pct)
                                 : "off")

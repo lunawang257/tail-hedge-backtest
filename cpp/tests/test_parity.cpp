@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
   param.m_call = 2;
   param.m_put = 2;
   param.units = 1;
+  param.call_put_ratio_pct = 100;
   param.roll_dte = 0;
   param.enable_gamma_scalp = false;
   param.eval_expected_pnl = false;
@@ -105,6 +106,12 @@ int main(int argc, char** argv) {
   Date as_of = parse_date(json_str_after(ref, "as_of"));
   double spot = ds.spot(as_of);
   check("spot", spot, json_num_after(ref, "spot"), 1e-4);
+
+  check("cp_ratio_20_short", scale_calls_from_puts(100, 20), 20, 0);
+  check("cp_ratio_20_long", scale_calls_from_puts(200, 20), 40, 0);
+  check("cp_ratio_100", scale_calls_from_puts(100, 100), 100, 0);
+  check("cp_ratio_50", scale_calls_from_puts(100, 50), 50, 0);
+  check("cp_ratio_25", scale_calls_from_puts(100, 25), 25, 0);
 
   auto sc = find_option_by_delta(ds, OptType::Call, as_of, spot, 0.40, 30,
                                  true, 0.01);

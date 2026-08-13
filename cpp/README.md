@@ -46,12 +46,17 @@ The strategy sells a short-dated call+put body and buys longer-dated wings
 | `--long-dte N` | Target days-to-expiry for the **long** (bought) wing legs. Default `60`. |
 | `--short-delta X` | Absolute delta target for short call/put selection (e.g. `0.40` ≈ 40Δ). Default `0.40`. |
 | `--long-delta X` | Absolute delta target for long wing selection (further OTM). Default `0.10`. |
-| `--units N` | Multiplier applied to all four legs (scales size). Default `1`. |
+| `--units N` | Multiplier applied to all four legs (scales size). Default `1`. Ignored when `--long-pos-mil > 0`. |
 | `--m-call X` | In fixed wing mode: long/short **ratio** for calls (e.g. `1.3` → 13 longs per 10 shorts). Default `2`. |
 | `--m-put X` | In fixed wing mode: long/short **ratio** for puts. Default `2`. |
-| `--balance X` | Starting cash / NLV. Default `1e6` (`100000` in the example above). |
+| `--call-put-ratio-pct X` | Call contracts as a **percent of puts** (default `100` = equal). `--call-put-ratio-pct 20` with puts −100/+200 → calls −20/+40. |
+| `--balance X` | Options-book starting cash / NLV. Default `1e6` (`100000` in the example above). |
+| `--long-pos-mil X` | Buy-and-hold overlay in $millions (default `0`). Buys `X*1e6` notional on day 1; NLV/MaxDD include W + stock. Alias: `--long-pos`. On each W roll, net cash from close+open is converted to/from overlay stock (sell highest cost-basis lots if cash is needed; buy more stock if cash is freed). Year-end tax is paid by selling stock; unused capital losses carry forward. |
+| `--hedge-ratio X` | With long-pos: size W so net long puts ≈ `X × (shares/100)`. |
 | `--commission X` | Option commission in $/contract. Default `1.7125`. |
 | `--slippage-pct X` | Option slippage as a **percent of mid** (e.g. `5` = 5%). Default `5`. |
+| `--lt-tax-pct X` | Long-term capital-gain tax percent (holding **> 1 year**). Default `37.1`. |
+| `--st-tax-pct X` | Short-term capital-gain tax percent (holding **≤ 1 year**). Default `54.1`. |
 
 CLI `w_backtest` uses **fixed** wing mode (`m_call` / `m_put`). Credit / theta
 wing sizing is available in the library and via `w_search`.
@@ -72,7 +77,10 @@ At least one exit path should stay enabled or positions hold until the last bar
 | `--loss-cut` / `--no-loss-cut` | Enable / disable loss-cut exits. Default: enabled. |
 
 Close **reasons** written in verbose mode: `dte_roll`, `expire`, `profit_take`,
-`loss_cut`, `final` (forced flatten on the last bar), plus `open` for entries.
+`loss_cut`, `final` (forced flatten on the last bar), plus `open` for option
+entries. Overlay stock: `overlay_open` (day-1 buy), `overlay_buy` / `overlay_sell`
+(rebalance leftover/short cash), `tax` (sell to pay year-end tax, and the tax
+row itself).
 
 #### Runtime / diagnostics
 
@@ -80,7 +88,7 @@ Close **reasons** written in verbose mode: `dte_roll`, `expire`, `profit_take`,
 |------|---------|
 | `--gamma-scalp` / `--no-gamma-scalp` | Hedge residual delta with stock when gamma scalping is on. Default: **off**. |
 | `--no-expected-pnl` | Skip periodic expected-P/L evaluation (default already off in CLI). |
-| `--verbose` / `-v` | Record every option open/close into a CSV (see below). |
+| `--verbose` / `-v` | Record every option and stock fill into a CSV (see below). |
 | `--verbose-out <path>` | Path for the verbose trade CSV (implies `--verbose`). Default `transactions.csv`. |
 | `--bench N` | Run the backtest `N` times and report average wall time. Trade CSV is written from the last run only. |
 | `-h` / `--help` | Print usage. |
@@ -100,18 +108,30 @@ Columns:
 | Column | Meaning |
 |--------|---------|
 | `date` | Session date of the fill |
-| `action` | `open` or `close` |
-| `structureId` | Monotonic id of the W structure |
-| `leg` | `short_call` / `short_put` / `long_call` / `long_put` |
-| `type` | `c` or `p` |
-| `strike` | Option strike |
-| `expiry` | Option expiration date |
-| `contracts` | Signed size (`+` long / `-` short) |
+| `action` | `open` / `close` (options), `buy` / `sell` (stock), `tax` (year-end tax paid) |
+| `structureId` | Monotonic id of the W structure (`0` before the first open) |
+| `leg` | `short_call` / `short_put` / `long_call` / `long_put` / `stock` / `tax` |
+| `type` | `c` or `p` (options), `s` (stock), `t` (tax) |
+| `strike` | Option strike (`0` for stock/tax) |
+| `expiry` | Option expiration date (empty for stock/tax) |
+| `contracts` | Signed option size (`+` long / `-` short); `0` for stock/tax |
+| `shares` | Signed stock size (`+` buy / `-` sell); `0` for options/tax |
 | `openPrice` | Per-share entry fill (incl. commission allocation) |
-| `closePrice` | Per-share exit fill on closes (`0` on opens) |
-| `pnl` | Realized capital gain on closes (`0` on opens) |
-| `reason` | Why the fill happened (`open`, `dte_roll`, `expire`, `profit_take`, `loss_cut`, `final`) |
+| `closePrice` | Per-share exit fill on closes/sells (`0` on opens/buys) |
+| `pnl` | Realized capital gain on closes/sells (`0` on opens/buys); tax amount as negative on `tax` rows |
+| `reason` | Why the fill happened (`open`, `dte_roll`, `expire`, `profit_take`, `loss_cut`, `final`, `overlay_open`, `overlay_buy`, `overlay_sell`, `tax`) |
 | `spot` | Underlying price on the fill date |
+| `hedgeRatio` | Target hedge ratio (`--hedge-ratio`); `0` when long-pos overlay is off |
+| `callPutRatioPct` | Call contracts as % of puts (`--call-put-ratio-pct`) |
+| `bhShares` | Buy-and-hold overlay shares after this fill |
+| `totalTax` | Cumulative tax paid so far |
+| `stLossCarry` / `ltLossCarry` | Unused ST/LT capital-loss carryover (`>0` means unused loss) |
+| `stGain` / `ltGain` | Year-to-date realized ST/LT capital gain (negative means loss) |
+| `cash` | Cash balance after this fill |
+| `stockNlv` | Stock mark (`shares × spot`) after this fill |
+| `totalNlv` | `cash + stockNlv +` option mark-to-market (W-strategy + stock) |
+| `costBasis` | Dollar cost of shares sold (`0` on buys/options) |
+| `tradeStGain` / `tradeLtGain` | This fill's ST/LT capital gain (negative means loss) |
 
 ## Parity tests
 
@@ -164,10 +184,17 @@ Or call `w_search` directly:
 | `--start-date` / `--end-date` | Inclusive date window for the search sample. |
 | `--every-n N` | Session thinning (default `5`) — keeps every Nth trading day to speed the grid. |
 | `--atm-band X` | Keep strikes within ±`X` fraction of spot when loading (default `0.20` = ±20%). |
-| `--units N` | Structure size for every grid config (default `10`). |
-| `--balance X` | Starting cash for each backtest (default `1e6`). |
+| `--units N` | Structure size for every grid config (default `10`). Ignored when `--long-pos-mil > 0` (size comes from hedge ratio). |
+| `--balance X` | Options-book starting cash for each backtest (default `1e6`). |
+| `--long-pos-mil X` | Buy-and-hold overlay in **$millions** (default `0` = off). Starts with `X*1e6` cash, buys that notional of the symbol on day 1, holds to end. Combined NLV/MaxDD = W-strategy + long stock. Prints a buy-and-hold-only baseline. Alias: `--long-pos`. |
+| `--hedge-ratio X` | Single hedge ratio (only with long-pos). Net long puts (`long − short` put contracts) protect `X × (shares/100)` of the long. |
+| `--hedge-ratios a,b,..` | Grid of hedge ratios when long-pos is on (default `0.5,1,1.5,2`). |
+| `--call-put-ratio-pct X` | Single value: call contracts as % of puts (`100` = equal). |
+| `--call-put-ratio-pcts a,b,..` | Grid of call/put percents (default `100,50,25`). `20` → calls are 20% of puts. |
 | `--commission X` | Option commission $/contract (default `1.7125`). |
 | `--slippage-pct X` | Option slippage % of mid; `5` = 5% (default `5`). |
+| `--lt-tax-pct X` | Long-term capital-gain tax % (default `37.1`). |
+| `--st-tax-pct X` | Short-term capital-gain tax % (default `54.1`). |
 | `--workers N` | Thread count for **one** symbol’s grid (default: hardware concurrency). |
 | `--out <path>` | Results CSV path (default `search-<SYM>-cpp.csv`). |
 | `--limit N` | Debug: evaluate only the first `N` grid configs. |
@@ -188,9 +215,11 @@ Defined in `cpp/src/w_search.cpp` (`GridSpec` / `build_grid`). Defaults:
 | `rollDTE` | `{0}` | DTE roll threshold |
 | `profitTake` | `{off,0.75}` | Profit-take fraction or disabled |
 | `lossCut` | `{off}` | Loss-cut disabled in default grid |
+| hedge ratio | `{0.5,1,1.5,2}` when `--long-pos-mil > 0` | Net-put protection vs long stock |
+| call/put ratio | `{100,50,25}` | Call contracts as % of puts (`100` = equal) |
 
-That’s **264** configs (DTE roll + expiry always on in the grid). Score =
-`annualReturn - 0.5 × maxDrawdown`.
+Score = `annualReturn - 0.5 × maxDrawdown`. Top-10 / CSV also report
+`taxPct` = cumulative tax paid / final NLV (percent).
 
 Hard rule: long wing contracts must always exceed short body contracts.
 For fixed mode, `long_short_ratio > 1` (e.g. `fixed:1.3` → 13 longs per 10
@@ -211,6 +240,8 @@ Shrink or pin any dimension without rebuilding (comma lists; one value = fixed):
 | `--wings` | `fixed:2,fixed:1.3,credit,theta` |
 | `--roll-dtes` | `0` |
 | `--profit-takes` / `--loss-cuts` | `off,0.75` (use `off` to disable) |
+| `--hedge-ratios` | `0.5,1,1.5,2` (only with `--long-pos-mil`) |
+| `--call-put-ratio-pcts` | `100,50,25` |
 
 Wing modes:
 
@@ -234,3 +265,4 @@ Parity on the small fixture: GBS matches to ~1e-15; backtest `finalNLV` within ~
 - C++ CLI defaults gamma scalp / expected P/L off (same as typical search configs).
 - Use `--verbose` on `w_backtest` for per-leg trade CSVs; search stays summary-only for speed.
 - Weekly/daily DTE synthesis and wing modes (`fixed` / `credit` / `theta`) are implemented in the library; `w_search` sweeps them, `w_backtest` exposes fixed wings via `--m-call` / `--m-put`.
+- MaxDrawdown is capped at 100% (account wiped out). Overlay mode no longer funds W rolls with a silent negative-cash loan: net cash from close+open is raised by selling highest-cost stock lots, or invested by buying more stock. Year-end tax uses short- vs long-term rates, sells stock to pay the bill, and carries unused losses forward.

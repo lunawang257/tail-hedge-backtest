@@ -38,13 +38,18 @@ struct StockPos {
   double num_shares = 0;
   double open_price = 0;
   Date open_date = 0;
+  // Permanent buy-and-hold overlay; never closed by gamma-scalp / roll flatten.
+  bool buy_and_hold = false;
 };
 
 struct PositionsAndStats {
   std::vector<OptPosition> opt_list;
   std::vector<StockPos> stocks;
   double cash = 0;
-  double annual_capital_gain = 0;
+  double annual_st_capital_gain = 0;
+  double annual_lt_capital_gain = 0;
+  double st_loss_carryover = 0;  // unused short-term loss (>0) carried forward
+  double lt_loss_carryover = 0;
   double total_tax = 0;
   double total_capital_gain = 0;
   double total_put_capital_gain = 0;
@@ -61,6 +66,7 @@ struct PositionsAndStats {
   int num_gamma_hedges = 0;
   double last_expected_pnl = 0;
   int last_wing_m_call = 0, last_wing_m_put = 0;
+  int last_units_used = 0;
   bool gamma_scalping_active = false;
 
   double initial_price = 0;
@@ -79,8 +85,30 @@ struct PositionsAndStats {
   double structure_pnl_pct(Date as_of, double spot) const;
   std::tuple<double, double, double> net_greeks() const;
   std::optional<int> short_min_dte(Date as_of) const;
-  void open_stock(double shares, double px, Date d);
-  std::pair<double, double> close_stock_positions(double shares, double px);
+  void open_stock(double shares, double px, Date d, bool buy_and_hold = false);
+  double buy_and_hold_shares() const;
+  void add_realized_gain(double gain, Date open_date, Date close_date,
+                         bool is_stock, bool is_put = false);
+  void fill_trade_snapshot(TradeRecord& tr, Date date, double spot) const;
+  void log_stock_trade(std::vector<TradeRecord>* log, Date date, double spot,
+                       const char* action, const char* reason,
+                       double signed_shares, double open_px, double close_px,
+                       double cost_basis, double st_gain, double lt_gain);
+  // Close long shares FIFO; returns (gain, avg_open). Updates cash.
+  std::pair<double, double> close_stock_positions(
+      double shares, double px, Date as_of, bool include_buy_and_hold = false,
+      double stock_comm = 0, std::vector<TradeRecord>* log = nullptr,
+      const char* reason = "", double spot = 0);
+  // Sell overlay (buy-and-hold) lots highest cost-basis first to raise cash.
+  // Returns net cash actually raised.
+  double sell_overlay_hifo(double cash_needed, double spot, Date d,
+                           double stock_comm,
+                           std::vector<TradeRecord>* log = nullptr,
+                           const char* reason = "overlay_sell");
+  // Spend cash on new overlay lots at spot (whole shares). Returns cash spent.
+  double buy_overlay(double cash_budget, double spot, Date d, double stock_comm,
+                     std::vector<TradeRecord>* log = nullptr,
+                     const char* reason = "overlay_buy");
 };
 
 }  // namespace wbt
