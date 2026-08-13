@@ -17,7 +17,9 @@
 #include <thread>
 #include <vector>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
+#include <stdexcept>
 
 using namespace wbt;
 
@@ -132,9 +134,7 @@ struct GridSpec {
   // fixed(ratio>1), credit, theta — long wings must outnumber short body.
   std::vector<WingSpec> wings = {
     {WingMode::Fixed, 1.6, 0.02, 0.0, 4},
-    {WingMode::Fixed, 1.8, 0.02, 0.0, 4},
     {WingMode::Fixed, 2.0, 0.02, 0.0, 4},
-    {WingMode::Fixed, 2.2, 0.02, 0.0, 4},
     {WingMode::Fixed, 2.4, 0.02, 0.0, 4},
     {WingMode::Credit, 2.0, 0.02, 0.0, 4},
     {WingMode::Theta, 2.0, 0.02, 0.0, 4},
@@ -572,6 +572,9 @@ int main(int argc, char** argv) {
             << " configs, " << workers << " workers, days=" << ds.dates.size()
             << " rows=" << ds.quotes.size() << " ===\n";
   print_grid(grid_spec, grid.size(), long_pos_mil);
+  std::cerr << std::fixed << std::setprecision(1)
+            << "  tax lt=" << (lt_tax * 100.0) << "%  st=" << (st_tax * 100.0)
+            << "%\n";
 
   // Print buy-and-hold baseline once (same for every config).
   if (long_pos_mil > 0) {

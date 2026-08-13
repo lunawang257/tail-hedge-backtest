@@ -158,7 +158,9 @@ Checks:
 Preferred entry point (builds + loops SPX / QQQ.gz / AAPL):
 
 ```bash
-./run_cpp_search.sh
+./run_cpp_search.sh                 # all symbols, no tax (default)
+./run_cpp_search.sh -tax            # default CA+federal tax (37.1% LT / 54.1% ST)
+./run_cpp_search.sh -no-tax NVDA    # listed symbols, 0 tax
 # optional overrides:
 START=2005-01-01 END=2023-12-31 WORKERS=8 EVERY_N=5 ./run_cpp_search.sh
 ```

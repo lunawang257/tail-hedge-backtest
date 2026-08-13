@@ -2,10 +2,13 @@
 # Build C++ W backtest and run parameter search.
 #
 # Usage:
-#   ./run_cpp_search.sh              # all symbols
-#   ./run_cpp_search.sh NVDA GOOG    # only listed symbols
+#   ./run_cpp_search.sh                 # all symbols, no tax (default)
+#   ./run_cpp_search.sh -tax            # all symbols, default CA+federal tax
+#   ./run_cpp_search.sh -no-tax NVDA    # listed symbols, 0 tax
+#   ./run_cpp_search.sh NVDA GOOG -tax
 #
 # Symbols: SPX QQQ AAPL (START→END window), NVDA GOOG AVGO (full history).
+# Flags: -tax / --tax (37.1% LT / 54.1% ST), -no-tax / --no-tax (0%; default).
 # Env overrides: OPTIONS_DATA YIELD START END EVERY_N ATM_BAND UNITS
 #   LONG_POS_MIL HEDGE_RATIOS CALL_PUT_RATIO_PCTS LT_TAX_PCT ST_TAX_PCT
 #   WORKERS BUILD_DIR LOG TOP10_OUT
@@ -33,6 +36,47 @@ TOP10_OUT="${TOP10_OUT:-$ROOT/search-top10-cpp.csv}"
 # Wide bounds so w_search loads the entire file (CLI requires dates).
 FULL_START="${FULL_START:-1990-01-01}"
 FULL_END="${FULL_END:-2099-12-31}"
+
+usage() {
+  cat <<EOF
+Usage: $0 [-tax|-no-tax] [SYMBOL ...]
+
+  -tax, --tax        Apply default capital-gain tax (lt=${LT_TAX_PCT}% st=${ST_TAX_PCT}%)
+  -no-tax, --no-tax  No tax (0%; default)
+
+Symbols: SPX QQQ AAPL NVDA GOOG AVGO (aliases: NVIDIA, GOOGLE, GOOGL).
+Omit symbols to run the full catalog.
+EOF
+}
+
+# Default: no tax. -tax uses LT_TAX_PCT / ST_TAX_PCT (37.1 / 54.1 unless overridden).
+USE_TAX=0
+declare -a SYM_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    -tax|--tax) USE_TAX=1 ;;
+    -no-tax|--no-tax) USE_TAX=0 ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "error: unknown flag: $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      SYM_ARGS+=("$arg")
+      ;;
+  esac
+done
+if [[ "$USE_TAX" -eq 0 ]]; then
+  RUN_LT_TAX_PCT=0
+  RUN_ST_TAX_PCT=0
+else
+  RUN_LT_TAX_PCT="$LT_TAX_PCT"
+  RUN_ST_TAX_PCT="$ST_TAX_PCT"
+fi
 
 normalize_symbol() {
   local s
@@ -84,12 +128,12 @@ job_for_symbol() {
 }
 
 declare -a SELECTED=()
-if [[ $# -eq 0 ]]; then
+if [[ ${#SYM_ARGS[@]} -eq 0 ]]; then
   for job in "${ALL_JOBS[@]}"; do
     SELECTED+=("$job")
   done
 else
-  for arg in "$@"; do
+  for arg in "${SYM_ARGS[@]}"; do
     SYM="$(normalize_symbol "$arg")"
     if job=$(job_for_symbol "$SYM"); then
       SELECTED+=("$job")
@@ -119,7 +163,7 @@ for job in "${SELECTED[@]}"; do
   INPUT="$(resolve_input "$SYM")"
   if [[ -f "$INPUT" ]]; then
     RUNNABLE+=("$job")
-  elif [[ $# -gt 0 ]]; then
+  elif [[ ${#SYM_ARGS[@]} -gt 0 ]]; then
     echo "error: missing input for $SYM: $INPUT" >&2
     exit 1
   else
@@ -154,7 +198,11 @@ echo "every_n=$EVERY_N  workers=$WORKERS  units=$UNITS  long_pos_mil=$LONG_POS_M
 if [[ "$LONG_POS_MIL" != "0" ]]; then
   echo "hedge_ratios=$HEDGE_RATIOS"
 fi
-echo "lt_tax_pct=$LT_TAX_PCT  st_tax_pct=$ST_TAX_PCT"
+if [[ "$USE_TAX" -eq 1 ]]; then
+  echo "tax=-tax  lt_tax_pct=$RUN_LT_TAX_PCT  st_tax_pct=$RUN_ST_TAX_PCT"
+else
+  echo "tax=-no-tax  lt_tax_pct=$RUN_LT_TAX_PCT  st_tax_pct=$RUN_ST_TAX_PCT"
+fi
 echo "call_put_ratio_pcts=$CALL_PUT_RATIO_PCTS"
 echo "Symbols: $(printf '%s ' "${SELECTED[@]%%|*}")"
 echo "Top-10 combined → $TOP10_OUT"
@@ -213,7 +261,7 @@ for job in "${SELECTED[@]}"; do
     --start-date "$RUN_START" --end-date "$RUN_END"
     --every-n "$EVERY_N" --atm-band "$ATM_BAND"
     --units "$UNITS" --workers "$WORKERS"
-    --lt-tax-pct "$LT_TAX_PCT" --st-tax-pct "$ST_TAX_PCT"
+    --lt-tax-pct "$RUN_LT_TAX_PCT" --st-tax-pct "$RUN_ST_TAX_PCT"
     --call-put-ratio-pcts "$CALL_PUT_RATIO_PCTS"
     --out "$OUT"
   )
