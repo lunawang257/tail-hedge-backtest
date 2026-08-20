@@ -20,6 +20,7 @@ set(WBT_SOURCES
   src/chain.cpp
   src/expected_pnl.cpp
   src/strategy.cpp
+  src/verbose_log.cpp
 )
 
 add_library(wbt STATIC ${WBT_SOURCES})

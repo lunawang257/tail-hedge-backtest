@@ -3,6 +3,7 @@
 #include "wbt/strategy.hpp"
 #include "wbt/types.hpp"
 #include "wbt/chain.hpp"
+#include "wbt/verbose_log.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -133,9 +134,9 @@ struct GridSpec {
   std::vector<double> long_deltas = {0.08, 0.12};
   // fixed(ratio>1), credit, theta — long wings must outnumber short body.
   std::vector<WingSpec> wings = {
-    {WingMode::Fixed, 1.6, 0.02, 0.0, 4},
-    {WingMode::Fixed, 2.0, 0.02, 0.0, 4},
-    {WingMode::Fixed, 2.4, 0.02, 0.0, 4},
+    //{WingMode::Fixed, 1.6, 0.02, 0.0, 4},
+    //{WingMode::Fixed, 2.0, 0.02, 0.0, 4},
+    //{WingMode::Fixed, 2.4, 0.02, 0.0, 4},
     {WingMode::Credit, 2.0, 0.02, 0.0, 4},
     {WingMode::Theta, 2.0, 0.02, 0.0, 4},
   };
@@ -422,6 +423,8 @@ void usage(const char* argv0) {
     << "  --st-tax-pct X         Short-term capital-gain tax % (default 54.1)\n"
     << "  --workers N            Threads (default hw concurrency)\n"
     << "  --out results.csv\n"
+    << "  --verbose-log <path>   After the grid, re-run the best-scoring config\n"
+    << "                         and write a collapsible HTML trade log\n"
     << "  --limit N              Debug: only first N configs\n"
     << "\n"
     << "Pin / shrink the search grid (comma lists; one value = fixed):\n"
@@ -441,7 +444,7 @@ void usage(const char* argv0) {
 int main(int argc, char** argv) {
   std::string symbol = "SPY";
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
-  std::string cache_path, out_path, iv_smile_path;
+  std::string cache_path, out_path, iv_smile_path, verbose_log_path;
   Date start = 20180101, end = 20191231;
   int every_n = 5;
   double atm_band = 0.20;
@@ -493,6 +496,7 @@ int main(int argc, char** argv) {
         st_tax = std::atof(need()) / 100.0;
       else if (eq("--workers")) workers = std::atoi(need());
       else if (eq("--out")) out_path = need();
+      else if (eq("--verbose-log")) verbose_log_path = need();
       else if (eq("--limit")) limit = std::atoi(need());
       else if (eq("--short-dtes")) grid_spec.short_dtes = parse_ints(need());
       else if (eq("--long-dtes")) grid_spec.long_dtes = parse_ints(need());
@@ -639,6 +643,36 @@ int main(int argc, char** argv) {
 
   auto t_end = std::chrono::steady_clock::now();
   write_csv(out_path, results, long_pos_mil);
+
+  if (!verbose_log_path.empty() && !results.empty()) {
+    auto best = std::max_element(
+        results.begin(), results.end(),
+        [](const SearchResult& a, const SearchResult& b) {
+          return a.score < b.score;
+        });
+    auto param = to_param(best->cfg, balance, symbol, opt_comm, opt_slip,
+                          long_pos_mil, lt_tax, st_tax);
+    std::cerr << "Re-running best config for HTML verbose log...\n";
+    auto bt = w_strategy(ds, param, true);
+    VerboseRunInfo run;
+    run.argv0 = argv[0];
+    run.search = true;
+    run.input = input;
+    run.yield = yield;
+    run.cache = cache_path;
+    run.iv_smile = iv_smile_path;
+    run.verbose_log = verbose_log_path;
+    run.start = start;
+    run.end = end;
+    run.every_n = every_n;
+    run.atm_band = atm_band;
+    if (write_verbose_html(verbose_log_path, symbol, param, bt, run))
+      std::cerr << "Wrote HTML verbose log (" << bt.verbose_log.size()
+                << " days) to " << verbose_log_path << "\n";
+    else
+      std::cerr << "Failed to write HTML verbose log: " << verbose_log_path
+                << "\n";
+  }
 
   double total_sec = std::chrono::duration<double>(t_end - t0).count();
   std::cerr << "\nDone in " << format_duration(total_sec) << "  wrote "

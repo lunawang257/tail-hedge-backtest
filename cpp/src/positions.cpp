@@ -164,37 +164,64 @@ static void split_hold_gain(Date open_date, Date close_date, double gain,
   }
 }
 
+static std::vector<size_t> hifo_long_indices(const std::vector<StockPos>& stocks,
+                                             bool include_buy_and_hold,
+                                             bool overlay_only) {
+  std::vector<size_t> idx;
+  idx.reserve(stocks.size());
+  for (size_t i = 0; i < stocks.size(); ++i) {
+    if (stocks[i].num_shares <= 1e-9) continue;
+    if (overlay_only) {
+      if (!stocks[i].buy_and_hold) continue;
+    } else if (stocks[i].buy_and_hold && !include_buy_and_hold) {
+      continue;
+    }
+    idx.push_back(i);
+  }
+  std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
+    if (stocks[a].open_price != stocks[b].open_price)
+      return stocks[a].open_price > stocks[b].open_price;
+    return stocks[a].open_date > stocks[b].open_date;
+  });
+  return idx;
+}
+
 std::pair<double, double> PositionsAndStats::close_stock_positions(
     double shares, double px, Date as_of, bool include_buy_and_hold,
     double stock_comm, std::vector<TradeRecord>* log, const char* reason,
     double spot) {
-  // Close long shares FIFO; returns (gain, avg_open).
+  // Close long shares highest cost-basis first; returns (gain, avg_open).
   // By default skips buy-and-hold overlay lots (roll / gamma flatten).
   double remaining = shares;
   double gain = 0, closed = 0, cost = 0;
-  for (auto it = stocks.begin(); it != stocks.end() && remaining > 1e-9;) {
-    if (it->num_shares <= 0) { ++it; continue; }
-    if (it->buy_and_hold && !include_buy_and_hold) { ++it; continue; }
-    double take = std::min(it->num_shares, remaining);
-    double lot_cost = it->open_price * take;
-    double lot_gain = (px - it->open_price) * take;
-    add_realized_gain(lot_gain, it->open_date, as_of, /*is_stock=*/true);
+  auto idx = hifo_long_indices(stocks, include_buy_and_hold, /*overlay_only=*/false);
+  for (size_t i : idx) {
+    if (remaining <= 1e-9) break;
+    auto& lot = stocks[i];
+    if (lot.num_shares <= 1e-9) continue;
+    double take = std::min(lot.num_shares, remaining);
+    double lot_cost = lot.open_price * take;
+    double lot_gain = (px - lot.open_price) * take;
+    Date lot_open = lot.open_date;
+    double lot_px = lot.open_price;
+    add_realized_gain(lot_gain, lot_open, as_of, /*is_stock=*/true);
     gain += lot_gain;
     cost += lot_cost;
     closed += take;
-    Date lot_open = it->open_date;
-    double lot_px = it->open_price;
-    it->num_shares -= take;
+    lot.num_shares -= take;
     remaining -= take;
     cash += px * take;
     total_commission += stock_comm * take;
-    if (it->num_shares < 1e-9) it = stocks.erase(it);
-    else ++it;
     double st_g = 0, lt_g = 0;
     split_hold_gain(lot_open, as_of, lot_gain, st_g, lt_g);
     log_stock_trade(log, as_of, spot > 0 ? spot : px, "sell", reason, -take,
                     lot_px, px, lot_cost, st_g, lt_g);
   }
+  stocks.erase(std::remove_if(stocks.begin(), stocks.end(),
+                              [](const StockPos& p) {
+                                return std::abs(p.num_shares) < 1e-9;
+                              }),
+               stocks.end());
   double avg = closed > 0 ? cost / closed : 0;
   return {gain, avg};
 }
@@ -207,17 +234,8 @@ double PositionsAndStats::sell_overlay_hifo(double cash_needed, double spot,
   double net_px = spot - stock_comm;
   if (net_px <= 1e-12) return 0;
 
-  std::vector<size_t> idx;
-  idx.reserve(stocks.size());
-  for (size_t i = 0; i < stocks.size(); ++i) {
-    if (stocks[i].buy_and_hold && stocks[i].num_shares > 1e-9)
-      idx.push_back(i);
-  }
-  std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b) {
-    if (stocks[a].open_price != stocks[b].open_price)
-      return stocks[a].open_price > stocks[b].open_price;
-    return stocks[a].open_date > stocks[b].open_date;
-  });
+  auto idx = hifo_long_indices(stocks, /*include_buy_and_hold=*/true,
+                               /*overlay_only=*/true);
 
   double raised = 0;
   double remaining_need = cash_needed;

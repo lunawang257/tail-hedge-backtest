@@ -401,9 +401,10 @@ double tax_on_net(const NetGains& n, const FixedParam& fp) {
          std::max(0.0, n.lt) * fp.long_term_tax;
 }
 
-// Deploy leftover cash into overlay shares, or sell highest-cost lots if cash
-// is short. Keeps the book from running a silent margin loan (which is what
-// made MaxDrawdown exceed 100%).
+// After each W open/close, option cash has already been applied (debit
+// deducted, credit added). Convert leftover cash into overlay shares, or sell
+// highest-cost lots if cash is short. Avoids a silent margin loan (which is
+// what made MaxDrawdown exceed 100%).
 void rebalance_overlay_cash(const WParam& param, Date date, double spot,
                             PositionsAndStats& stat, TradeLog* log) {
   if (param.long_pos_mil <= 0) return;
@@ -471,6 +472,7 @@ void calc_drawdown(PositionsAndStats& stat, Date date, double equity) {
   if (equity > stat.cur_peak) {
     stat.cur_peak = equity;
     stat.cur_peak_date = format_date(date);
+    stat.peak_date = date;
   }
   if (stat.cur_peak > 0) {
     double dd = (stat.cur_peak - equity) / stat.cur_peak * 100.0;
@@ -478,6 +480,7 @@ void calc_drawdown(PositionsAndStats& stat, Date date, double equity) {
     if (dd > stat.max_drawdown) {
       stat.max_drawdown = dd;
       stat.max_drawdown_peak_date = format_date(date);
+      stat.max_dd_date = date;
     }
   }
 }
@@ -507,6 +510,257 @@ void update_greeks(Date date, double spot, PositionsAndStats& stat) {
   }
 }
 
+std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date date,
+                                          double spot) {
+  std::vector<VerbosePosRow> rows;
+  double opt_total = 0;
+  for (const auto& opt : stat.opt_list) {
+    double mark = stat.mark_option(opt, date, spot);
+    double tot = static_cast<double>(opt.num_contracts) * mark * CONTRACT_SCALE;
+    opt_total += tot;
+    VerbosePosRow r;
+    r.type = opt.opt_type == OptType::Call ? "Call" : "Put";
+    r.contracts = opt.num_contracts;
+    r.has_contracts = true;
+    r.strike = opt.strike;
+    r.has_strike = true;
+    r.exp_date = opt.exp_date;
+    r.has_exp = true;
+    r.price = mark;
+    r.has_price = true;
+    r.total = tot;
+    rows.push_back(r);
+  }
+  VerbosePosRow opt_sum;
+  opt_sum.type = "Options";
+  opt_sum.total = opt_total;
+  rows.push_back(opt_sum);
+
+  double stock_mtm = 0;
+  int n_lots = 0;
+  for (const auto& p : stat.stocks) {
+    if (std::abs(p.num_shares) < 1e-9) continue;
+    ++n_lots;
+    VerbosePosRow stk;
+    stk.type = "Stock";
+    stk.contracts = p.num_shares;
+    stk.has_contracts = true;
+    stk.price = spot;
+    stk.has_price = true;
+    stk.cost_basis = p.open_price;
+    stk.has_cost_basis = true;
+    stk.total = p.num_shares * spot;
+    stock_mtm += stk.total;
+    rows.push_back(stk);
+  }
+  if (n_lots == 0) {
+    VerbosePosRow stk;
+    stk.type = "Stock";
+    stk.contracts = 0;
+    stk.has_contracts = true;
+    stk.price = spot;
+    stk.has_price = true;
+    stk.total = 0;
+    rows.push_back(stk);
+  } else if (n_lots > 1) {
+    VerbosePosRow stk_sum;
+    stk_sum.type = "Stock";
+    stk_sum.contracts = stat.total_shares();
+    stk_sum.has_contracts = true;
+    stk_sum.total = stock_mtm;
+    rows.push_back(stk_sum);
+  }
+
+  VerbosePosRow cash;
+  cash.type = "Cash";
+  cash.total = stat.cash;
+  rows.push_back(cash);
+
+  VerbosePosRow nlv;
+  nlv.type = "NLV";
+  nlv.total = opt_total + stock_mtm + stat.cash;
+  rows.push_back(nlv);
+  return rows;
+}
+
+struct BhTracker {
+  bool on = false;
+  double shares = 0;
+  double cash = 0;
+  double peak = 0;
+  double max_dd = 0;
+  Date max_dd_date = 0;
+
+  void init(Date d, double spot, double notional, double comm) {
+    on = notional > 0 && spot > 0;
+    if (!on) return;
+    shares = std::floor(notional / (spot + comm));
+    if (shares < 1.0) {
+      cash = notional;
+      shares = 0;
+    } else {
+      cash = notional - (spot + comm) * shares;
+    }
+    peak = notional;
+    max_dd = 0;
+    max_dd_date = d;
+  }
+  void mark(Date d, double spot) {
+    if (!on) return;
+    double nlv = cash + shares * spot;
+    if (nlv > peak) peak = nlv;
+    if (peak > 0) {
+      double dd = (peak - std::max(nlv, 0.0)) / peak * 100.0;
+      if (dd > 100.0) dd = 100.0;
+      if (dd > max_dd) {
+        max_dd = dd;
+        max_dd_date = d;
+      }
+    }
+  }
+  double nlv(double spot) const { return on ? cash + shares * spot : 0; }
+};
+
+struct VerboseRecorder {
+  std::vector<VerboseDay> days;
+  VerboseDay cur;
+  bool has_cur = false;
+  bool snapped = false;
+  bool snap_has_opts = false;
+  BhTracker bh;
+
+  void ensure_day(Date d, double spot) {
+    if (has_cur && cur.date != d) flush();
+    if (!has_cur) {
+      cur = VerboseDay{};
+      cur.date = d;
+      cur.spot = spot;
+      has_cur = true;
+      snapped = false;
+      snap_has_opts = false;
+    }
+  }
+
+  void snapshot(const PositionsAndStats& stat, Date date, double spot, bool force) {
+    ensure_day(date, spot);
+    bool has_opts = !stat.opt_list.empty();
+    if (snapped && !force && !(has_opts && !snap_has_opts)) return;
+    cur.spot = spot;
+    cur.positions = build_pos_rows(stat, date, spot);
+    cur.nlv = stat.cash + stat.total_shares() * spot + stat.option_nlv(date, spot);
+    snapped = true;
+    snap_has_opts = has_opts;
+  }
+
+  void capture_end_stats(const PositionsAndStats& stat, Date date, double spot) {
+    if (!has_cur) return;
+    cur.peak = stat.cur_peak;
+    cur.max_dd = stat.max_drawdown;
+    cur.max_dd_date = stat.max_dd_date ? stat.max_dd_date : date;
+    cur.st_loss_carry = stat.st_loss_carryover;
+    cur.lt_loss_carry = stat.lt_loss_carryover;
+    cur.st_gain = stat.annual_st_capital_gain;
+    cur.lt_gain = stat.annual_lt_capital_gain;
+    cur.bh_nlv = bh.nlv(spot);
+    cur.bh_max_dd = bh.max_dd;
+    cur.bh_max_dd_date = bh.max_dd_date;
+    if (!snapped) snapshot(stat, date, spot, true);
+  }
+
+  void flush() {
+    if (!has_cur) return;
+    if (!cur.actions.empty()) days.push_back(std::move(cur));
+    has_cur = false;
+    snapped = false;
+    snap_has_opts = false;
+  }
+
+  void add_open_w(const PositionsAndStats& stat) {
+    VerboseAction a;
+    a.kind = VerboseActionKind::OpenW;
+    a.reason = "open";
+    for (const auto& opt : stat.opt_list) {
+      VerboseActionLeg L;
+      L.type = opt.opt_type == OptType::Call ? "Call" : "Put";
+      L.contracts = opt.num_contracts;
+      L.strike = opt.strike;
+      L.exp_date = opt.exp_date;
+      L.price = opt.open_price;
+      // Cash-flow sign: short credit is +, long debit is −.
+      L.total = -opt.get_cost_basis();
+      a.pnl += L.total;
+      a.legs.push_back(L);
+    }
+    if (!a.legs.empty()) cur.actions.push_back(std::move(a));
+  }
+
+  void add_close_from_log(const TradeLog* log, size_t from, const char* reason) {
+    if (!log) return;
+    VerboseAction a;
+    a.kind = VerboseActionKind::CloseW;
+    a.reason = reason ? reason : "";
+    for (size_t i = from; i < log->size(); ++i) {
+      const auto& t = (*log)[i];
+      if (t.action != "close") continue;
+      VerboseActionLeg L;
+      L.type = (t.put_call == 'p' || t.put_call == 'P') ? "Put" : "Call";
+      L.contracts = t.num_contracts;
+      L.strike = t.strike;
+      L.exp_date = t.exp_date;
+      L.cost_basis = t.open_price;
+      L.price = t.close_price;
+      L.total = t.pnl;
+      double denom = std::abs(t.num_contracts) * CONTRACT_SCALE;
+      L.pnl_per = denom > 0 ? t.pnl / denom : 0;
+      a.pnl += t.pnl;
+      a.legs.push_back(L);
+    }
+    if (!a.legs.empty()) cur.actions.push_back(std::move(a));
+  }
+
+  void add_other_from_log(const TradeLog* log, size_t from) {
+    if (!log) return;
+    size_t i = from;
+    while (i < log->size()) {
+      const auto& t = (*log)[i];
+      if (t.action == "tax") {
+        VerboseAction a;
+        a.kind = VerboseActionKind::Tax;
+        a.reason = t.reason;
+        a.pnl = std::abs(t.pnl);
+        cur.actions.push_back(std::move(a));
+        ++i;
+        continue;
+      }
+      if (t.action == "buy" || t.action == "sell") {
+        const std::string act = t.action;
+        const std::string reason = t.reason;
+        double shares = 0, notional = 0;
+        while (i < log->size() && (*log)[i].action == act &&
+               (*log)[i].reason == reason) {
+          const auto& s = (*log)[i];
+          double sh = std::abs(s.shares);
+          double px = (act == "buy")
+                          ? s.open_price
+                          : (s.close_price != 0 ? s.close_price : s.open_price);
+          shares += sh;
+          notional += sh * px;
+          ++i;
+        }
+        VerboseAction a;
+        a.kind = (act == "buy") ? VerboseActionKind::BuyStock
+                                : VerboseActionKind::SellStock;
+        a.reason = reason;
+        a.shares = shares;
+        a.price = shares > 0 ? notional / shares : 0;
+        cur.actions.push_back(std::move(a));
+        continue;
+      }
+      ++i;
+    }
+  }
+};
+
 }  // namespace
 
 void buy_and_hold_baseline(const OptionsDataset& ds, double long_pos_mil,
@@ -533,6 +787,34 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
   stat.all_data = &ds;
   stat.cash = initial_capital;
   TradeLog* log = verbose ? &result.trades : nullptr;
+  VerboseRecorder rec;
+  VerboseRecorder* recp = verbose ? &rec : nullptr;
+  if (recp) {
+    double bh_notional =
+        long_pos_dollars > 0 ? long_pos_dollars : param.fixed.initial_balance;
+    rec.bh.init(ds.dates.front(), ds.spot(ds.dates.front()), bh_notional,
+                param.fixed.stock_comm_per_share);
+  }
+  auto log_mark = [&]() -> size_t { return log ? log->size() : 0; };
+  auto rec_others = [&](size_t m, Date date, double spot) {
+    if (!recp) return;
+    recp->ensure_day(date, spot);
+    recp->add_other_from_log(log, m);
+  };
+  auto rec_close = [&](size_t m, Date date, double spot, const char* reason) {
+    if (!recp) return;
+    recp->ensure_day(date, spot);
+    recp->add_close_from_log(log, m, reason);
+  };
+  auto rec_open = [&](Date date, double spot) {
+    if (!recp || stat.opt_list.empty()) return;
+    recp->ensure_day(date, spot);
+    recp->add_open_w(stat);
+  };
+  auto rec_snap_book = [&](Date date, double spot, bool force) {
+    if (!recp) return;
+    recp->snapshot(stat, date, spot, force);
+  };
 
   std::vector<double> spots;
   if (param.eval_expected_pnl) spots.reserve(ds.dates.size());
@@ -547,15 +829,22 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
 
     if (i == 0) {
       stat.initial_price = spot;
-      if (long_pos_dollars > 0)
+      if (long_pos_dollars > 0) {
+        size_t m = log_mark();
         open_buy_and_hold(param, date, spot, stat, log);
+        rec_others(m, date, spot);
+        if (recp) recp->snapshot(stat, date, spot, /*force=*/false);
+      }
       result.long_pos_shares = stat.buy_and_hold_shares();
       // Peak at full starting capital (cash + stock mark ≈ initial_capital).
       stat.cur_peak = initial_capital;
       stat.cur_peak_date = format_date(date);
+      stat.peak_date = date;
     }
     if (year_of(date) != prev_year) {
+      size_t m = log_mark();
       year_end_tax(param, date, spot, stat, /*invest_leftover=*/true, log);
+      rec_others(m, date, spot);
       prev_year = year_of(date);
     }
 
@@ -572,24 +861,47 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
       double pnl_pct = (opt_nlv - stat.structure_entry_cash) / denom;
       auto [do_roll, reason] = should_roll(param, date, stat, pnl_pct);
       if (do_roll) {
+        if (recp) recp->snapshot(stat, date, spot, /*force=*/false);
+        size_t m_close = log_mark();
         close_all_options(param, date, spot, stat, reason, log);
+        rec_close(m_close, date, spot, reason);
         // Flatten gamma-scalp stock only; keep buy-and-hold overlay.
+        size_t m_stk = log_mark();
         close_all_stock(param, date, spot, stat, /*include_buy_and_hold=*/false,
                         reason, log);
+        rec_others(m_stk, date, spot);
         ++stat.num_rolls;
         // If overlay was sold down to zero, put close proceeds back into stock
         // before sizing the replacement W.
-        if (long_pos_dollars > 0 && stat.buy_and_hold_shares() <= 0)
+        if (long_pos_dollars > 0 && stat.buy_and_hold_shares() <= 0) {
+          size_t m = log_mark();
           rebalance_overlay_cash(param, date, spot, stat, log);
+          rec_others(m, date, spot);
+        }
         open_w_structure(param, date, ds, stat, log);
-        rebalance_overlay_cash(param, date, spot, stat, log);
+        rec_open(date, spot);
+        {
+          size_t m = log_mark();
+          rebalance_overlay_cash(param, date, spot, stat, log);
+          rec_others(m, date, spot);
+        }
+        rec_snap_book(date, spot, /*force=*/true);
         opt_nlv = stat.option_nlv(date, spot);
       }
     } else {
-      if (long_pos_dollars > 0 && stat.buy_and_hold_shares() <= 0)
+      if (long_pos_dollars > 0 && stat.buy_and_hold_shares() <= 0) {
+        size_t m = log_mark();
         rebalance_overlay_cash(param, date, spot, stat, log);
+        rec_others(m, date, spot);
+      }
       open_w_structure(param, date, ds, stat, log);
-      rebalance_overlay_cash(param, date, spot, stat, log);
+      rec_open(date, spot);
+      {
+        size_t m = log_mark();
+        rebalance_overlay_cash(param, date, spot, stat, log);
+        rec_others(m, date, spot);
+      }
+      rec_snap_book(date, spot, /*force=*/true);
       if (!stat.opt_list.empty())
         opt_nlv = stat.option_nlv(date, spot);
     }
@@ -608,9 +920,15 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
     double nlv = stat.total_shares() * spot + opt_nlv;
     double equity = nlv + stat.cash;
     calc_drawdown(stat, date, equity);
+    if (recp) {
+      recp->bh.mark(date, spot);
+      if (recp->has_cur && recp->cur.date == date)
+        recp->capture_end_stats(stat, date, spot);
+    }
     if (equity <= 0) {
       // Account wiped out: stop, report 100% DD and zero terminal NLV.
       stat.max_drawdown = 100.0;
+      stat.max_dd_date = date;
       stat.cash = 0;
       stat.opt_list.clear();
       stat.stocks.clear();
@@ -623,6 +941,10 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
       result.expected_pnl = stat.last_expected_pnl;
       result.units_used = stat.last_units_used;
       if (verbose) {
+        if (recp) {
+          recp->flush();
+          result.verbose_log = std::move(rec.days);
+        }
         std::cerr << "C++ backtest WIPED OUT on " << format_date(date)
                   << " dd=100% rolls=" << stat.num_rolls << "\n";
       }
@@ -632,13 +954,29 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
 
   Date last = ds.dates.back();
   double last_spot = ds.spot(last);
-  if (!stat.opt_list.empty())
+  if (!stat.opt_list.empty()) {
+    if (recp) recp->snapshot(stat, last, last_spot, /*force=*/false);
+    size_t m = log_mark();
     close_all_options(param, last, last_spot, stat, "final", log);
+    rec_close(m, last, last_spot, "final");
+  }
   // Close everything including buy-and-hold for a cash final NLV.
-  if (std::abs(stat.total_shares()) > 1e-9)
+  if (std::abs(stat.total_shares()) > 1e-9) {
+    size_t m = log_mark();
     close_all_stock(param, last, last_spot, stat, /*include_buy_and_hold=*/true,
                     "final", log);
-  year_end_tax(param, last, last_spot, stat, /*invest_leftover=*/false, log);
+    rec_others(m, last, last_spot);
+  }
+  {
+    size_t m = log_mark();
+    year_end_tax(param, last, last_spot, stat, /*invest_leftover=*/false, log);
+    rec_others(m, last, last_spot);
+  }
+  if (recp) {
+    recp->capture_end_stats(stat, last, last_spot);
+    recp->flush();
+    result.verbose_log = std::move(rec.days);
+  }
 
   double years = std::max(days_between(start, end) / YEAR_FRAC, 1e-6);
   double final_nlv = stat.cash;

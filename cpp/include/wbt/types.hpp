@@ -173,6 +173,61 @@ struct TradeRecord {
   double trade_lt_gain = 0;
 };
 
+enum class VerboseActionKind { OpenW, CloseW, BuyStock, SellStock, Tax };
+
+struct VerbosePosRow {
+  std::string type;  // Call, Put, Stock, Cash, Options, NLV
+  double contracts = 0;  // option contracts or stock shares
+  double strike = 0;
+  Date exp_date = 0;
+  double price = 0;
+  double cost_basis = 0;  // per-share stock lot cost; unused for options
+  double total = 0;
+  bool has_contracts = false;
+  bool has_strike = false;
+  bool has_exp = false;
+  bool has_price = false;
+  bool has_cost_basis = false;
+};
+
+struct VerboseActionLeg {
+  std::string type;  // Call / Put
+  int contracts = 0;
+  double strike = 0;
+  Date exp_date = 0;
+  double cost_basis = 0;
+  double price = 0;
+  double pnl_per = 0;
+  double total = 0;
+};
+
+struct VerboseAction {
+  VerboseActionKind kind = VerboseActionKind::OpenW;
+  std::string reason;
+  double pnl = 0;
+  double shares = 0;
+  double price = 0;
+  std::vector<VerboseActionLeg> legs;
+};
+
+struct VerboseDay {
+  Date date = 0;
+  double spot = 0;
+  double nlv = 0;
+  double peak = 0;
+  double max_dd = 0;
+  Date max_dd_date = 0;
+  double st_loss_carry = 0;
+  double lt_loss_carry = 0;
+  double st_gain = 0;
+  double lt_gain = 0;
+  double bh_nlv = 0;
+  double bh_max_dd = 0;
+  Date bh_max_dd_date = 0;
+  std::vector<VerbosePosRow> positions;
+  std::vector<VerboseAction> actions;
+};
+
 struct BacktestResult {
   double annual_return = 0;
   double max_drawdown = 0;
@@ -190,6 +245,7 @@ struct BacktestResult {
   bool ok = true;
   std::string error;
   std::vector<TradeRecord> trades;  // populated when verbose=true
+  std::vector<VerboseDay> verbose_log;  // HTML verbose log (when verbose=true)
 };
 
 // Cumulative tax paid as a percent of terminal NLV (0 if NLV is not positive).

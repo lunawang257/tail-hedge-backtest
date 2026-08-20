@@ -90,7 +90,8 @@ row itself).
 | `--no-expected-pnl` | Skip periodic expected-P/L evaluation (default already off in CLI). |
 | `--verbose` / `-v` | Record every option and stock fill into a CSV (see below). |
 | `--verbose-out <path>` | Path for the verbose trade CSV (implies `--verbose`). Default `transactions.csv`. |
-| `--bench N` | Run the backtest `N` times and report average wall time. Trade CSV is written from the last run only. |
+| `--verbose-log <path>` | Write a collapsible HTML trade log (implies recording fills). Fold/unfold by year and day; includes **Fold all** / **Unfold all**. |
+| `--bench N` | Run the backtest `N` times and report average wall time. Trade CSV/HTML are written from the last run only. |
 | `-h` / `--help` | Print usage. |
 
 ### Verbose trade CSV
@@ -132,6 +133,26 @@ Columns:
 | `totalNlv` | `cash + stockNlv +` option mark-to-market (W-strategy + stock) |
 | `costBasis` | Dollar cost of shares sold (`0` on buys/options) |
 | `tradeStGain` / `tradeLtGain` | This fill's ST/LT capital gain (negative means loss) |
+
+### Verbose HTML log
+
+```bash
+./build/w_backtest \
+  -i ../data/SPY_fixture_small.csv \
+  -y ../data/yield-curve-rates-1990-2024.csv \
+  --short-dte 30 --long-dte 60 --units 1 --balance 100000 \
+  --verbose-log trades.html
+```
+
+Each day with a buy/sell is nested under year → day. Days start folded (`[+]` to expand). The page toolbar has **Fold all** and **Unfold all**. A foldable **Reproduce command** at the top copies the full CLI that regenerates this file.
+
+Each day shows:
+
+- Header: date, spot, NLV, peak, max drawdown (and date), ST/LT loss carry, ST/LT YTD gain, buy-and-hold NLV / maxDD / maxDD date
+- Position table: option legs (mark-to-market), options total, stock, cash, NLV
+- Actions: **Open W Strategy**, **Close W Strategy** (reason + P/L), stock buy/sell (shares, price, reason), year-end tax
+
+`--verbose-log` can be combined with `--verbose` / `--verbose-out` to also write the CSV.
 
 ## Parity tests
 
@@ -199,6 +220,7 @@ Or call `w_search` directly:
 | `--st-tax-pct X` | Short-term capital-gain tax % (default `54.1`). |
 | `--workers N` | Thread count for **one** symbol’s grid (default: hardware concurrency). |
 | `--out <path>` | Results CSV path (default `search-<SYM>-cpp.csv`). |
+| `--verbose-log <path>` | After the grid, re-run the **best-scoring** config and write a collapsible HTML trade log (same format as `w_backtest --verbose-log`). |
 | `--limit N` | Debug: evaluate only the first `N` grid configs. |
 
 Within one symbol, configs are evaluated in parallel across `--workers` threads (same dataset, different params). `run_cpp_search.sh` defaults `WORKERS` to `hw.ncpu`.
@@ -265,6 +287,6 @@ Parity on the small fixture: GBS matches to ~1e-15; backtest `finalNLV` within ~
 ## Notes
 
 - C++ CLI defaults gamma scalp / expected P/L off (same as typical search configs).
-- Use `--verbose` on `w_backtest` for per-leg trade CSVs; search stays summary-only for speed.
+- Use `--verbose` on `w_backtest` for per-leg trade CSVs, or `--verbose-log` for a foldable HTML trade diary. Search stays summary-only for speed unless `--verbose-log` is set (then the winner is re-run once).
 - Weekly/daily DTE synthesis and wing modes (`fixed` / `credit` / `theta`) are implemented in the library; `w_search` sweeps them, `w_backtest` exposes fixed wings via `--m-call` / `--m-put`.
 - MaxDrawdown is capped at 100% (account wiped out). Overlay mode no longer funds W rolls with a silent negative-cash loan: net cash from close+open is raised by selling highest-cost stock lots, or invested by buying more stock. Year-end tax uses short- vs long-term rates, sells stock to pay the bill, and carries unused losses forward.

@@ -3,6 +3,7 @@
 #include "wbt/strategy.hpp"
 #include "wbt/gbs.hpp"
 #include "wbt/chain.hpp"
+#include "wbt/verbose_log.hpp"
 #include <iostream>
 #include <fstream>
 #include <iomanip>
@@ -69,6 +70,8 @@ static void usage(const char* argv0) {
     "  --verbose                Record every option/stock fill to CSV\n"
     "  --verbose-out <path>     Verbose CSV path (implies --verbose;\n"
     "                           default transactions.csv)\n"
+    "  --verbose-log <path>     Write a collapsible HTML trade log (implies\n"
+    "                           recording fills; year/day fold)\n"
     "  --bench N                Repeat backtest N times for timing\n"
     "  -h, --help\n";
 }
@@ -132,6 +135,7 @@ int main(int argc, char** argv) {
   int bench = 1;
   bool verbose = false;
   std::string verbose_out = "transactions.csv";
+  std::string verbose_log;
 
   for (int i = 1; i < argc; ++i) {
     auto eq = [&](const char* s) { return std::strcmp(argv[i], s) == 0; };
@@ -193,6 +197,7 @@ int main(int argc, char** argv) {
       verbose_out = need();
       verbose = true;
     }
+    else if (eq("--verbose-log")) verbose_log = need();
     else if (eq("--bench")) bench = std::atoi(need());
     else if (eq("-h") || eq("--help")) { usage(argv[0]); return 0; }
     else {
@@ -247,11 +252,12 @@ int main(int argc, char** argv) {
   }
 
   // Verbose trade log is only needed on the last (or sole) run.
+  const bool record = verbose || !verbose_log.empty();
   BacktestResult last;
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < bench; ++i) {
-    bool record = verbose && (i == bench - 1);
-    last = w_strategy(ds, param, record);
+    bool rec = record && (i == bench - 1);
+    last = w_strategy(ds, param, rec);
   }
   auto t1 = std::chrono::steady_clock::now();
   double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -260,6 +266,25 @@ int main(int argc, char** argv) {
     const double hr = param.long_pos_mil > 0 ? param.hedge_ratio : 0.0;
     write_trades_csv(verbose_out, last.trades, hr, param.call_put_ratio_pct);
     std::cerr << "Wrote " << last.trades.size() << " trades to " << verbose_out << "\n";
+  }
+  if (!verbose_log.empty()) {
+    VerboseRunInfo run;
+    run.argv0 = argv[0];
+    run.search = false;
+    run.input = input;
+    run.yield = yield;
+    run.cache = cache_path;
+    run.iv_smile = iv_smile_path;
+    run.verbose_log = verbose_log;
+    run.start = start;
+    run.end = end;
+    run.every_n = every_n;
+    run.atm_band = atm_band;
+    if (write_verbose_html(verbose_log, param.fixed.symbol, param, last, run))
+      std::cerr << "Wrote HTML verbose log (" << last.verbose_log.size()
+                << " days) to " << verbose_log << "\n";
+    else
+      std::cerr << "Failed to write HTML verbose log: " << verbose_log << "\n";
   }
 
   if (param.long_pos_mil > 0) {

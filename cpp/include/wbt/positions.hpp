@@ -74,6 +74,8 @@ struct PositionsAndStats {
   double max_drawdown = 0;
   std::string cur_peak_date;
   std::string max_drawdown_peak_date;
+  Date peak_date = 0;
+  Date max_dd_date = 0;
 
   const OptionsDataset* all_data = nullptr;
 
@@ -94,7 +96,8 @@ struct PositionsAndStats {
                        const char* action, const char* reason,
                        double signed_shares, double open_px, double close_px,
                        double cost_basis, double st_gain, double lt_gain);
-  // Close long shares FIFO; returns (gain, avg_open). Updates cash.
+  // Close long shares highest cost-basis first; returns (gain, avg_open).
+  // Updates cash.
   std::pair<double, double> close_stock_positions(
       double shares, double px, Date as_of, bool include_buy_and_hold = false,
       double stock_comm = 0, std::vector<TradeRecord>* log = nullptr,
