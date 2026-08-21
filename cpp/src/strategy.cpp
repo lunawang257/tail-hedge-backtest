@@ -21,7 +21,7 @@ double quote_mid(const SyntheticQuote& q) {
 
 // Signed cash to open `num_contracts` (+ long / − short). Matches `open_leg`:
 // positive = cash paid (debit), negative = cash received (credit). Includes
-// slippage and per-contract commission.
+// slippage and per-contract commission (split-adjusted to the quote date).
 double preview_leg_cash(const WParam& param, const SyntheticQuote& quote,
                         int num_contracts) {
   if (num_contracts == 0) return 0;
@@ -29,7 +29,7 @@ double preview_leg_cash(const WParam& param, const SyntheticQuote& quote,
   double slip = param.fixed.opt_slippage_percent;
   double trade_px = is_buy ? quote_mid(quote) * (1.0 + slip)
                            : quote_mid(quote) * (1.0 - slip);
-  double opt_comm = param.fixed.opt_comm_per_contract;
+  double opt_comm = param.fixed.option_commission(quote.data_date);
   int n = std::abs(num_contracts);
   int signed_dir = is_buy ? 1 : -1;
   double cash_per = trade_px * CONTRACT_SCALE + (is_buy ? opt_comm : -opt_comm);
@@ -201,7 +201,7 @@ double open_leg(const WParam& param, Date date, double spot, PositionsAndStats& 
   double mid = quote_mid(quote);
   double slip = param.fixed.opt_slippage_percent;
   double trade_px = is_buy ? mid * (1.0 + slip) : mid * (1.0 - slip);
-  double opt_comm = param.fixed.opt_comm_per_contract;
+  double opt_comm = param.fixed.option_commission(date);
   int n = std::abs(num_contracts);
   double cash_flow = preview_leg_cash(param, quote, num_contracts);
 
@@ -369,7 +369,7 @@ double close_one_option(const WParam& param, Date date, double spot, PositionsAn
   bool is_long = opt.num_contracts > 0;
   double slip = param.fixed.opt_slippage_percent;
   double trade_px = is_long ? std::max(mid * (1 - slip), 0.0) : std::max(mid * (1 + slip), 0.0);
-  double opt_comm = param.fixed.opt_comm_per_contract;
+  double opt_comm = param.fixed.option_commission(date);
   double cash_change = trade_px * opt.num_contracts * CONTRACT_SCALE
                        - opt_comm * std::abs(opt.num_contracts);
   // Close fill incl. commission, signed like open_price for P/L consistency.

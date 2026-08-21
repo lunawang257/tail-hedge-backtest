@@ -32,6 +32,20 @@ OptionsDataset load_options_csv(const std::string& path,
 
 void adjust_prices_for_splits_and_merges(std::vector<OptionQuote>& quotes);
 
+// Default: <dir(options_csv)>/<SYMBOL>-merge-split.csv
+// If symbol is empty, uses the options filename stem (strips .csv / .csv.gz).
+std::string default_merge_split_path(const std::string& options_csv_path,
+                                     const std::string& symbol = {});
+
+// Load a merge/split CSV (date, factor, optional numerator/denominator).
+MergeSplitHistory load_merge_split_csv(const std::string& path);
+
+// Resolve --merge-split: empty explicit_path uses the default beside the
+// options file. Missing default → empty history; missing explicit path throws.
+MergeSplitHistory resolve_merge_split(const std::string& options_csv_path,
+                                      const std::string& explicit_path,
+                                      const std::string& symbol = {});
+
 // Simple binary cache (quotes only + rebuild index)
 void save_dataset_cache(const OptionsDataset& ds, const std::string& path);
 OptionsDataset load_dataset_cache(const std::string& path);

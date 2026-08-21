@@ -66,7 +66,8 @@ const char* wing_name(WingMode m) {
 
 WParam to_param(const SearchConfig& c, double balance, const std::string& symbol,
                 double opt_comm, double opt_slip, double long_pos_mil,
-                double lt_tax, double st_tax) {
+                double lt_tax, double st_tax,
+                const MergeSplitHistory& merge_split) {
   WParam p;
   p.fixed.initial_balance = balance;
   p.fixed.symbol = symbol;
@@ -74,6 +75,7 @@ WParam to_param(const SearchConfig& c, double balance, const std::string& symbol
   p.fixed.opt_slippage_percent = opt_slip;
   p.fixed.long_term_tax = lt_tax;
   p.fixed.short_term_tax = st_tax;
+  p.fixed.merge_split = merge_split;
   p.short_dte = c.short_dte;
   p.long_dte = c.long_dte;
   p.short_delta = c.short_delta;
@@ -398,6 +400,9 @@ void usage(const char* argv0) {
     << "  --cache path           Binary cache path\n"
     << "  --iv-smile path.csv    IV smile CSV (default: <data-dir>/<SYM>-ivsmile.csv;\n"
     << "                         build if missing, reuse if present)\n"
+    << "  --merge-split path.csv Merge/split history (default: <data-dir>/<SYM>-merge-split.csv).\n"
+    << "                         Scales option commission by remaining split factor:\n"
+    << "                         before 2:1 then 7:1 → 1/14 of --commission, between → 1/7\n"
     << "  --start-date YYYY-MM-DD\n"
     << "  --end-date YYYY-MM-DD\n"
     << "  --every-n N            Session thinning (default 5)\n"
@@ -443,6 +448,7 @@ int main(int argc, char** argv) {
   std::string symbol = "SPY";
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
   std::string cache_path, out_path, iv_smile_path, verbose_log_path;
+  std::string merge_split_path;
   Date start = 20180101, end = 20191231;
   int every_n = 5;
   double atm_band = 0.20;
@@ -471,6 +477,7 @@ int main(int argc, char** argv) {
       else if (eq("-y")) yield = need();
       else if (eq("--cache")) cache_path = need();
       else if (eq("--iv-smile")) iv_smile_path = need();
+      else if (eq("--merge-split")) merge_split_path = need();
       else if (eq("--start-date")) start = parse_date(need());
       else if (eq("--end-date")) end = parse_date(need());
       else if (eq("--every-n")) every_n = std::atoi(need());
@@ -557,6 +564,17 @@ int main(int argc, char** argv) {
   if (out_path.empty()) out_path = "search-" + symbol + "-cpp.csv";
   if (iv_smile_path.empty()) iv_smile_path = default_iv_smile_path(input, symbol);
 
+  MergeSplitHistory merge_split;
+  try {
+    merge_split = resolve_merge_split(input, merge_split_path, symbol);
+  } catch (const std::exception& e) {
+    std::cerr << "error: " << e.what() << "\n";
+    return 1;
+  }
+  if (merge_split_path.empty())
+    merge_split_path = default_merge_split_path(input, symbol);
+  if (!std::filesystem::exists(merge_split_path)) merge_split_path.clear();
+
   load_yield_data(yield);
   auto ds = ensure_cache(input, cache_path, start, end, every_n, atm_band);
   if (ds.dates.empty()) {
@@ -604,7 +622,7 @@ int main(int argc, char** argv) {
       if (i >= grid.size()) break;
       auto cfg = grid[i];
       auto param = to_param(cfg, balance, symbol, opt_comm, opt_slip, long_pos_mil,
-                            lt_tax, st_tax);
+                            lt_tax, st_tax, merge_split);
       auto t1 = std::chrono::steady_clock::now();
       auto bt = w_strategy(ds, param, false);
       auto t2 = std::chrono::steady_clock::now();
@@ -649,7 +667,7 @@ int main(int argc, char** argv) {
           return a.score < b.score;
         });
     auto param = to_param(best->cfg, balance, symbol, opt_comm, opt_slip,
-                          long_pos_mil, lt_tax, st_tax);
+                          long_pos_mil, lt_tax, st_tax, merge_split);
     std::cerr << "Re-running best config for HTML verbose log...\n";
     auto bt = w_strategy(ds, param, true);
     VerboseRunInfo run;
@@ -659,6 +677,7 @@ int main(int argc, char** argv) {
     run.yield = yield;
     run.cache = cache_path;
     run.iv_smile = iv_smile_path;
+    run.merge_split = merge_split_path;
     run.verbose_log = verbose_log_path;
     run.start = start;
     run.end = end;

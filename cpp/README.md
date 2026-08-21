@@ -31,6 +31,8 @@ cmake --build build -j
 |------|---------|
 | `-i <path>` | Options chain CSV (plain or `.csv.gz`). Required in practice; defaults to a small SPY fixture if omitted. |
 | `-y <path>` | Yield-curve CSV used for risk-free rates (and dividend yield lookups) in Merton/GBS pricing. |
+| `--iv-smile <path>` | IV smile CSV (default: `<data-dir>/<stem>-ivsmile.csv`). |
+| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<stem>-merge-split.csv`, beside `-i`). Scales option commission by remaining later split factors (2:1 then 7:1 → `1/14` of `--commission` before both, `1/7` between). Missing default file → unadjusted commission. |
 | `--start-date YYYY-MM-DD` | Inclusive first session to load. Omit to use the first date in the file. |
 | `--end-date YYYY-MM-DD` | Inclusive last session to load. Omit to use the last date in the file. |
 | `--trade-every-n-days N` | Thin the calendar: keep every Nth trading session (default `1` = every day). |
@@ -53,7 +55,7 @@ The strategy sells a short-dated call+put body and buys longer-dated wings
 | `--balance X` | Options-book starting cash / NLV. Default `1e6` (`100000` in the example above). |
 | `--long-pos-mil X` | Buy-and-hold overlay in $millions (default `0`). Buys `X*1e6` notional on day 1; NLV/MaxDD include W + stock. Alias: `--long-pos`. On each W roll, net cash from close+open is converted to/from overlay stock (sell highest cost-basis lots if cash is needed; buy more stock if cash is freed). Year-end tax is paid by selling stock; unused capital losses carry forward. |
 | `--hedge-ratio X` | With long-pos: size W so net long puts ≈ `X × (shares/100)`. |
-| `--commission X` | Option commission in $/contract. Default `1.7125`. |
+| `--commission X` | Option commission in $/contract **today**. Default `1.7125`. Dates before later splits are scaled via `--merge-split`. |
 | `--slippage-pct X` | Option slippage as a **percent of mid** (e.g. `5` = 5%). Default `5`. |
 | `--lt-tax-pct X` | Long-term capital-gain tax percent (holding **> 1 year**). Default `37.1`. |
 | `--st-tax-pct X` | Short-term capital-gain tax percent (holding **≤ 1 year**). Default `54.1`. |
@@ -204,6 +206,8 @@ Or call `w_search` directly:
 | `-i <path>` | Options chain CSV / `.csv.gz` to search over. **Required.** |
 | `-y <path>` | Yield-curve CSV. |
 | `--cache <path>` | Binary dataset cache path (built automatically if missing). |
+| `--iv-smile <path>` | IV smile CSV (default: `<data-dir>/<SYM>-ivsmile.csv`). |
+| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<SYM>-merge-split.csv`, same directory as `-i`). Scales option commission by the product of **later** split factors: after a 2:1 then 7:1, commission before both is `1/14` of `--commission`, and `1/7` between the two splits. Missing default file → unadjusted commission. |
 | `--start-date` / `--end-date` | Inclusive date window for the search sample. |
 | `--every-n N` | Session thinning (default `5`) — keeps every Nth trading day to speed the grid. |
 | `--atm-band X` | Keep strikes within ±`X` fraction of spot when loading (default `0.20` = ±20%). |
@@ -214,7 +218,7 @@ Or call `w_search` directly:
 | `--hedge-ratios a,b,..` | Grid of hedge ratios when long-pos is on (default `0.5,1,1.5,2`). |
 | `--call-put-ratio-pct X` | Single value: call contracts as % of puts (`100` = equal). |
 | `--call-put-ratio-pcts a,b,..` | Grid of call/put percents (default `100,50,25`). `20` → calls are 20% of puts. |
-| `--commission X` | Option commission $/contract (default `1.7125`). |
+| `--commission X` | Option commission in $/contract **today** (default `1.7125`). Dates before later splits are scaled via `--merge-split`. |
 | `--slippage-pct X` | Option slippage % of mid; `5` = 5% (default `5`). |
 | `--lt-tax-pct X` | Long-term capital-gain tax % (default `37.1`). |
 | `--st-tax-pct X` | Short-term capital-gain tax % (default `54.1`). |

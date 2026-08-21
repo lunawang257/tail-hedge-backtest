@@ -73,6 +73,35 @@ struct SyntheticQuote {
   bool interpolated = false;
 };
 
+// Corporate action used to scale today's option commission back in time.
+// `factor` is new-shares / old-shares (2:1 split → 2; reverse 1:10 → 0.1).
+struct MergeSplitEvent {
+  Date date = 0;
+  double factor = 1.0;
+};
+
+struct MergeSplitHistory {
+  std::vector<MergeSplitEvent> events;  // sorted by date
+
+  // Product of factors for events strictly after `as_of`. After all splits
+  // this is 1; before a 2:1 then 7:1 it is 14.
+  double remaining_factor(Date as_of) const {
+    double p = 1.0;
+    for (const auto& e : events) {
+      if (e.date > as_of && e.factor > 0.0 && std::isfinite(e.factor)) p *= e.factor;
+    }
+    return p;
+  }
+
+  // Historical commission = today / remaining_factor(as_of).
+  double scale_commission(double today_comm, Date as_of) const {
+    if (!as_of || events.empty()) return today_comm;
+    double f = remaining_factor(as_of);
+    if (!(f > 0.0) || !std::isfinite(f)) return today_comm;
+    return today_comm / f;
+  }
+};
+
 struct FixedParam {
   double initial_balance = 1e6;
   // Defaults: CA + federal + NIIT stacked rates (percent via CLI).
@@ -83,6 +112,11 @@ struct FixedParam {
   double stock_slippage = 0;
   double opt_slippage_percent = 0.05;  // already decimal (5% of mid)
   std::string symbol = "SPY";
+  MergeSplitHistory merge_split;
+
+  double option_commission(Date as_of) const {
+    return merge_split.scale_commission(opt_comm_per_contract, as_of);
+  }
 };
 
 enum class WingMode { Fixed, Credit, Theta };

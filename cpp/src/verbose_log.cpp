@@ -254,22 +254,22 @@ button { font: inherit; cursor:pointer; background:#fff; border:1px solid var(--
 button:hover { border-color: var(--acc); color: var(--acc); }
 .meta { color:var(--muted); font-size:0.9rem; margin:12px 0 16px; }
 .meta div { margin: 2px 0; }
+details.cmdbox { background:var(--card); border:1px solid var(--line);
+  border-radius:8px; padding: 2px 8px 2px 4px; margin: 0 0 12px; }
+details.cmdbox > summary { align-items: center; width: 100%; }
+details.cmdbox > summary .copy { margin-left: auto; flex: 0 0 auto; }
 pre.cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 0.82rem; color:var(--ink); background:#fff;
           border:1px solid var(--line); border-radius:6px; padding:10px 12px;
           overflow-x: auto; white-space: pre-wrap; word-break: break-word;
           margin: 4px 8px 12px 28px; }
-details.cmdbox { background:var(--card); border:1px solid var(--line);
-  border-radius:8px; padding: 2px 8px 2px 4px; margin: 0 0 12px; }
-details.cmdbox summary { align-items: center; }
-details.cmdbox summary .copy { margin-left: auto; }
 details { margin: 4px 0; }
 details.year, details.day { background:var(--card); border:1px solid var(--line);
   border-radius:8px; padding: 2px 8px 2px 4px; }
 details.day { margin: 6px 0 6px 12px; }
 summary { cursor:pointer; list-style:none; display:flex; align-items:flex-start; gap:8px;
           padding: 6px 4px; user-select:none; }
-summary::-webkit-details-marker { display:none; }
+summary::-webkit-details-marker, summary::marker { display:none; }
 .pm { flex:0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
       font-weight:700; color:var(--acc); min-width: 2.2em; display:inline-block;
       border:1px solid var(--line); border-radius:4px; text-align:center;
@@ -295,7 +295,7 @@ const char* kJs = R"JS(
 function setOpen(sel, open) {
   document.querySelectorAll(sel).forEach(function(d) { d.open = open; });
 }
-function foldAll() { setOpen('details.year, details.day', false); }
+function foldAll() { setOpen('details', false); }
 function unfoldAll() { setOpen('details.year, details.day', true); }
 function copyReproduce(ev) {
   ev.preventDefault();
@@ -383,6 +383,7 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
     if (!run.yield.empty()) kv("-y", sh_quote(run.yield));
     if (!run.cache.empty()) kv("--cache", sh_quote(run.cache));
     if (!run.iv_smile.empty()) kv("--iv-smile", sh_quote(run.iv_smile));
+    if (!run.merge_split.empty()) kv("--merge-split", sh_quote(run.merge_split));
     if (run.start) kv("--start-date", format_date(run.start));
     if (run.end) kv("--end-date", format_date(run.end));
     kv("--every-n", std::to_string(run.every_n));
@@ -417,6 +418,7 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
   if (!run.yield.empty()) kv("-y", sh_quote(run.yield));
   if (!run.cache.empty()) kv("--cache", sh_quote(run.cache));
   if (!run.iv_smile.empty()) kv("--iv-smile", sh_quote(run.iv_smile));
+  if (!run.merge_split.empty()) kv("--merge-split", sh_quote(run.merge_split));
   if (run.start) kv("--start-date", format_date(run.start));
   if (run.end) kv("--end-date", format_date(run.end));
   if (run.every_n != 1)
@@ -477,10 +479,12 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
       << "</div>\n<div class=\"meta\">\n";
 
   out << "<details class=\"cmdbox\">\n"
-         "<summary><span class=\"pm\"></span>"
+         "<summary>"
+         "<span class=\"pm\"></span>"
          "<span class=\"lbl\">Reproduce command</span>"
          "<button type=\"button\" class=\"copy\" onclick=\"copyReproduce(event)\">Copy</button>"
-         "</summary>\n<pre class=\"cmd\" id=\"reproduce-cmd\">"
+         "</summary>\n"
+         "<pre class=\"cmd\" id=\"reproduce-cmd\">"
       << html_escape(reproduce_command(symbol, param, run))
       << "</pre>\n</details>\n";
 

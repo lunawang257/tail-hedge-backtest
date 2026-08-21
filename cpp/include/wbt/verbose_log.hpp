@@ -15,6 +15,7 @@ struct VerboseRunInfo {
   std::string yield;
   std::string cache;
   std::string iv_smile;
+  std::string merge_split;
   std::string verbose_log;
   Date start = 0;
   Date end = 0;

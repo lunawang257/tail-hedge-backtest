@@ -1,6 +1,8 @@
 *~
 *.log
 data/cache/
+# Search result CSVs (large; regenerate with w_search / run_cpp_search.sh)
+search*.csv
 # Stale outputs from the removed Python search scripts
 spx-search-*.csv
 spx-search-*.pid

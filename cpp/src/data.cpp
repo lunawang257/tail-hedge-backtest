@@ -7,6 +7,8 @@
 #include <unordered_set>
 #include <cstdint>
 #include <cstring>
+#include <cctype>
+#include <filesystem>
 #include <memory>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -717,6 +719,136 @@ OptionsDataset::quotes_for(Date d, Date exp, OptType type) const {
       [](OptType t, const OptionQuote& q) { return t < q.put_call; });
   if (type_lo == type_hi) return {nullptr, nullptr};
   return {type_lo, type_hi};
+}
+
+namespace {
+
+std::string csv_stem(const std::string& filename) {
+  std::string name = filename;
+  auto ends_with = [](const std::string& s, const char* suf) {
+    const size_t n = std::strlen(suf);
+    return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+  };
+  if (ends_with(name, ".gz") || ends_with(name, ".GZ")) name.resize(name.size() - 3);
+  if (ends_with(name, ".csv") || ends_with(name, ".CSV")) name.resize(name.size() - 4);
+  return name;
+}
+
+std::string lower_copy(std::string s) {
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
+std::string trim_copy(std::string s) {
+  auto not_space = [](unsigned char c) { return !std::isspace(c); };
+  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+  return s;
+}
+
+}  // namespace
+
+std::string default_merge_split_path(const std::string& options_csv_path,
+                                     const std::string& symbol) {
+  namespace fs = std::filesystem;
+  fs::path in(options_csv_path);
+  fs::path dir = in.parent_path();
+  if (dir.empty()) dir = ".";
+
+  std::string base = symbol;
+  if (base.empty()) {
+    base = csv_stem(in.filename().string());
+    if (base.empty()) base = "options";
+  }
+  return (dir / (base + "-merge-split.csv")).string();
+}
+
+MergeSplitHistory load_merge_split_csv(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot open merge-split file: " + path);
+
+  std::string header;
+  if (!std::getline(in, header))
+    throw std::runtime_error("empty merge-split file: " + path);
+  if (!header.empty() && header.back() == '\r') header.pop_back();
+  if (header.size() >= 3 &&
+      static_cast<unsigned char>(header[0]) == 0xEF &&
+      static_cast<unsigned char>(header[1]) == 0xBB &&
+      static_cast<unsigned char>(header[2]) == 0xBF) {
+    header.erase(0, 3);
+  }
+
+  auto cols = split_csv(header);
+  int i_date = -1, i_factor = -1, i_num = -1, i_den = -1;
+  for (int i = 0; i < static_cast<int>(cols.size()); ++i) {
+    std::string name = lower_copy(trim_copy(cols[static_cast<size_t>(i)]));
+    if (name == "date") i_date = i;
+    else if (name == "factor") i_factor = i;
+    else if (name == "numerator") i_num = i;
+    else if (name == "denominator") i_den = i;
+  }
+  if (i_date < 0)
+    throw std::runtime_error("merge-split file missing date column: " + path);
+
+  MergeSplitHistory hist;
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (trim_copy(line).empty()) continue;
+    auto f = split_csv(line);
+    if (i_date >= static_cast<int>(f.size())) continue;
+    MergeSplitEvent ev;
+    try {
+      ev.date = parse_date(trim_copy(f[static_cast<size_t>(i_date)]));
+    } catch (...) {
+      continue;
+    }
+    if (!ev.date) continue;
+
+    bool got_factor = false;
+    if (i_factor >= 0 && i_factor < static_cast<int>(f.size()) &&
+        !trim_copy(f[static_cast<size_t>(i_factor)]).empty()) {
+      try {
+        ev.factor = std::stod(trim_copy(f[static_cast<size_t>(i_factor)]));
+        got_factor = true;
+      } catch (...) {}
+    }
+    if (!got_factor && i_num >= 0 && i_den >= 0 &&
+        i_num < static_cast<int>(f.size()) && i_den < static_cast<int>(f.size())) {
+      try {
+        double num = std::stod(trim_copy(f[static_cast<size_t>(i_num)]));
+        double den = std::stod(trim_copy(f[static_cast<size_t>(i_den)]));
+        if (den > 0) {
+          ev.factor = num / den;
+          got_factor = true;
+        }
+      } catch (...) {}
+    }
+    if (!got_factor || !(ev.factor > 0) || !std::isfinite(ev.factor)) continue;
+    hist.events.push_back(ev);
+  }
+  std::sort(hist.events.begin(), hist.events.end(),
+            [](const MergeSplitEvent& a, const MergeSplitEvent& b) {
+              return a.date < b.date;
+            });
+  std::cerr << "Loaded " << hist.events.size() << " merge/split events from "
+            << path << "\n";
+  return hist;
+}
+
+MergeSplitHistory resolve_merge_split(const std::string& options_csv_path,
+                                      const std::string& explicit_path,
+                                      const std::string& symbol) {
+  namespace fs = std::filesystem;
+  const std::string path = explicit_path.empty()
+                               ? default_merge_split_path(options_csv_path, symbol)
+                               : explicit_path;
+  if (fs::exists(path)) return load_merge_split_csv(path);
+  if (!explicit_path.empty())
+    throw std::runtime_error("cannot open merge-split file: " + path);
+  std::cerr << "No merge-split file at " << path
+            << "; using unadjusted option commission\n";
+  return {};
 }
 
 }  // namespace wbt

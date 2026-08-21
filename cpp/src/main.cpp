@@ -26,6 +26,9 @@ static void usage(const char* argv0) {
     "  --trade-every-n-days N   Keep every Nth session (default 1)\n"
     "  --iv-smile <path.csv>    IV smile CSV (default: <data-dir>/<stem>-ivsmile.csv;\n"
     "                           build if missing, reuse if present)\n"
+    "  --merge-split <path.csv> Merge/split history (default: <data-dir>/<stem>-merge-split.csv).\n"
+    "                           Scales option commission by remaining split factor:\n"
+    "                           before 2:1 then 7:1 → 1/14 of --commission, between → 1/7\n"
     "  --cache <path.bin>       Binary options cache (load if present, else build+save)\n"
     "  --atm-band X             Keep strikes within ±X of spot when loading (default 0)\n"
     "\n"
@@ -125,6 +128,7 @@ static void write_trades_csv(const std::string& path,
 int main(int argc, char** argv) {
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
   std::string iv_smile_path, cache_path;
+  std::string merge_split_path;
   WParam param;
   param.enable_gamma_scalp = false;
   param.eval_expected_pnl = false;
@@ -146,6 +150,7 @@ int main(int argc, char** argv) {
     if (eq("-i")) input = need();
     else if (eq("-y")) yield = need();
     else if (eq("--iv-smile")) iv_smile_path = need();
+    else if (eq("--merge-split")) merge_split_path = need();
     else if (eq("--cache")) cache_path = need();
     else if (eq("--atm-band")) atm_band = std::atof(need());
     else if (eq("--short-dte")) param.short_dte = std::atoi(need());
@@ -213,6 +218,15 @@ int main(int argc, char** argv) {
     // Beside the options file: <stem>-ivsmile.csv (e.g. QQQ.csv → QQQ-ivsmile.csv).
     iv_smile_path = default_iv_smile_path(input);
   }
+  try {
+    param.fixed.merge_split = resolve_merge_split(input, merge_split_path);
+  } catch (const std::exception& e) {
+    std::cerr << "error: " << e.what() << "\n";
+    return 1;
+  }
+  if (merge_split_path.empty())
+    merge_split_path = default_merge_split_path(input);
+  if (!std::filesystem::exists(merge_split_path)) merge_split_path.clear();
 
   load_yield_data(yield);
   OptionsDataset ds;
@@ -275,6 +289,7 @@ int main(int argc, char** argv) {
     run.yield = yield;
     run.cache = cache_path;
     run.iv_smile = iv_smile_path;
+    run.merge_split = merge_split_path;
     run.verbose_log = verbose_log;
     run.start = start;
     run.end = end;

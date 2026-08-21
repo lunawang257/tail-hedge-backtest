@@ -9,6 +9,7 @@
 #include <cmath>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 #include <map>
 
 using namespace wbt;
@@ -112,6 +113,37 @@ int main(int argc, char** argv) {
   check("cp_ratio_100", scale_calls_from_puts(100, 100), 100, 0);
   check("cp_ratio_50", scale_calls_from_puts(100, 50), 50, 0);
   check("cp_ratio_25", scale_calls_from_puts(100, 25), 25, 0);
+
+  {
+    MergeSplitHistory h;
+    h.events.push_back({parse_date("2010-01-01"), 2.0});
+    h.events.push_back({parse_date("2014-06-09"), 7.0});
+    check("ms_before_both", h.scale_commission(1.0, parse_date("2009-12-31")),
+          1.0 / 14.0, 1e-12);
+    check("ms_between", h.scale_commission(1.0, parse_date("2012-06-01")),
+          1.0 / 7.0, 1e-12);
+    check("ms_on_second_split", h.scale_commission(1.0, parse_date("2014-06-09")),
+          1.0, 1e-12);
+    check("ms_after", h.scale_commission(1.0, parse_date("2015-01-01")), 1.0,
+          1e-12);
+    check("ms_remaining_before", h.remaining_factor(parse_date("2009-12-31")),
+          14.0, 1e-12);
+
+    const char* tmp = "/tmp/wbt-merge-split-test.csv";
+    {
+      std::ofstream out(tmp);
+      out << "date,symbol,event_type,ratio,numerator,denominator,factor,notes,source\n"
+          << "2010-01-01,TEST,split,2:1,2,1,2,n,s\n"
+          << "2014-06-09,TEST,split,7:1,7,1,7,n,s\n";
+    }
+    auto loaded = load_merge_split_csv(tmp);
+    check("ms_csv_n", static_cast<double>(loaded.events.size()), 2.0, 0);
+    check("ms_csv_before", loaded.scale_commission(14.0, parse_date("2009-01-01")),
+          1.0, 1e-12);
+    check("ms_csv_between", loaded.scale_commission(14.0, parse_date("2012-01-01")),
+          2.0, 1e-12);
+    std::remove(tmp);
+  }
 
   auto sc = find_option_by_delta(ds, OptType::Call, as_of, spot, 0.40, 30,
                                  true, 0.01);
