@@ -247,7 +247,9 @@ Score = `annualReturn - 0.5 × maxDrawdown`. Top-10 / CSV also report
 
 Hard rule: long wing contracts must always exceed short body contracts.
 For fixed mode, `long_short_ratio > 1` (e.g. `fixed:1.3` → 13 longs per 10
-shorts). `fixed:1` is rejected; credit / theta size from at least `n+1` upward.
+shorts). `fixed:1` is rejected. Credit picks a real ratio in `(1, maxWingMult]`
+that is a net credit after slippage and commission (no 2:1 floor); if none
+exists the structure is not opened. Theta sizes from at least `n+1` upward.
 
 Shrink or pin any dimension without rebuilding (comma lists; one value = fixed):
 
@@ -272,8 +274,10 @@ Wing modes:
 - **fixed(ratio)**: buy `round(short_contracts × ratio)` wing contracts
   (`m_call` / `m_put` are long/short ratios, e.g. `1.3` → 13 longs per 10
   shorts; ratio must be `> 1`).
-- **credit**: increase wing size from `n+1` up to `maxWingMult` while keeping
-  long debit ≤ short credit × `(1 - creditBuffer)` (never below `n+1`).
+- **credit**: choose the largest long/short ratio in `(1, maxWingMult]` (e.g.
+  `1.1`, `2.25`) such that long debit ≤ short credit × `(1 - creditBuffer)`
+  **after slippage and commission**. Longs must still exceed shorts. If even
+  the minimum (`short+1`) is a debit, skip the open.
 - **theta**: increase wing size from `n+1` while net structure theta ≥
   `thetaThreshold` (never below `n+1`).
 

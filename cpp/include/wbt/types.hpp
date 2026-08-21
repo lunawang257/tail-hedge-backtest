@@ -95,7 +95,7 @@ struct WParam {
   double long_delta = 0.10;
   int n_call = 1, n_put = 1;
   // Fixed wing mode: long/short contract ratio (e.g. 1.3 → 13 longs per 10 shorts).
-  // Credit/theta: unused (wing size chosen at runtime).
+  // Credit/theta: unused as an input (wing size chosen at runtime).
   double m_call = 2, m_put = 2;
   int units = 1;
   // Call contracts as a percent of the put side (100 = equal). After puts are
@@ -105,6 +105,9 @@ struct WParam {
   WingMode wing_mode = WingMode::Fixed;
   double credit_buffer = 0.02;
   double theta_threshold = 0.0;
+  // Credit: max long/short contract ratio (e.g. 4 → up to 4:1). The chosen
+  // ratio can be any real value in (1, max_wing_mult] that is a credit after
+  // slippage and commission; there is no 2:1 floor.
   int max_wing_mult = 5;
   int roll_dte = 7;
   bool roll_on_expiry = true;

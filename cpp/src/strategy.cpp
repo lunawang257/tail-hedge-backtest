@@ -4,6 +4,7 @@
 #include "wbt/yield.hpp"
 #include "wbt/expected_pnl.hpp"
 #include <cmath>
+#include <climits>
 #include <iostream>
 #include <algorithm>
 #include <vector>
@@ -14,22 +15,168 @@ namespace {
 
 using TradeLog = std::vector<TradeRecord>;
 
-double trade_mid(const SyntheticQuote& q, bool is_long, double slip) {
-  double mid = q.mid > 0 ? q.mid : 0.5 * (q.bid + q.ask);
-  return is_long ? mid * (1.0 + slip) : mid * (1.0 - slip);
+double quote_mid(const SyntheticQuote& q) {
+  return q.mid > 0 ? q.mid : 0.5 * (q.bid + q.ask);
+}
+
+// Signed cash to open `num_contracts` (+ long / − short). Matches `open_leg`:
+// positive = cash paid (debit), negative = cash received (credit). Includes
+// slippage and per-contract commission.
+double preview_leg_cash(const WParam& param, const SyntheticQuote& quote,
+                        int num_contracts) {
+  if (num_contracts == 0) return 0;
+  bool is_buy = num_contracts > 0;
+  double slip = param.fixed.opt_slippage_percent;
+  double trade_px = is_buy ? quote_mid(quote) * (1.0 + slip)
+                           : quote_mid(quote) * (1.0 - slip);
+  double opt_comm = param.fixed.opt_comm_per_contract;
+  int n = std::abs(num_contracts);
+  int signed_dir = is_buy ? 1 : -1;
+  double cash_per = trade_px * CONTRACT_SCALE + (is_buy ? opt_comm : -opt_comm);
+  return signed_dir * cash_per * n;
+}
+
+void call_counts_from_puts(int short_p, int long_p, double call_put_ratio_pct,
+                           int& short_c, int& long_c) {
+  short_c = scale_calls_from_puts(short_p, call_put_ratio_pct);
+  long_c = scale_calls_from_puts(long_p, call_put_ratio_pct);
+  if (short_c > 0) long_c = std::max(long_c, short_c + 1);
+}
+
+// True iff the structure is a net credit after slippage and commission, with
+// long debit ≤ short credit × (1 − credit_buffer). Longs must outnumber shorts.
+bool is_credit_after_costs(const WParam& param,
+                           const SyntheticQuote& qsc, const SyntheticQuote& qsp,
+                           const SyntheticQuote& qlc, const SyntheticQuote& qlp,
+                           int short_c, int short_p, int long_c, int long_p) {
+  if (short_p <= 0 || long_p <= short_p) return false;
+  if (short_c > 0 && long_c <= short_c) return false;
+  double short_credit =
+      -(preview_leg_cash(param, qsc, -short_c) +
+        preview_leg_cash(param, qsp, -short_p));
+  double long_debit =
+      preview_leg_cash(param, qlc, long_c) + preview_leg_cash(param, qlp, long_p);
+  if (!(short_credit > 0)) return false;
+  double haircut = std::max(0.0, param.credit_buffer);
+  double cap = short_credit * (1.0 - haircut);
+  return long_debit + 1e-9 < cap;
+}
+
+// Largest long/short put ratio in (1, max_wing_mult] that is still a credit
+// after slip+commission. Ratio can be 1.1, 2.25, etc. (integer contract counts).
+bool choose_credit_wings_for_shorts(
+    const WParam& param, const SyntheticQuote& qsc, const SyntheticQuote& qsp,
+    const SyntheticQuote& qlc, const SyntheticQuote& qlp, int short_p,
+    int& long_p, int& long_c) {
+  int max_mult = std::max(1, param.max_wing_mult);
+  int min_lp = short_p + 1;
+  int max_lp = short_p * max_mult;
+  if (max_lp < min_lp) return false;
+  auto ok = [&](int n_lp) {
+    int n_sc = 0, n_lc = 0;
+    call_counts_from_puts(short_p, n_lp, param.call_put_ratio_pct, n_sc, n_lc);
+    return is_credit_after_costs(param, qsc, qsp, qlc, qlp, n_sc, short_p, n_lc,
+                                 n_lp);
+  };
+  if (!ok(min_lp)) return false;
+  int lo = min_lp, hi = max_lp;
+  while (lo < hi) {
+    int mid = lo + (hi - lo + 1) / 2;
+    if (ok(mid)) lo = mid;
+    else hi = mid - 1;
+  }
+  long_p = lo;
+  int n_sc = 0;
+  call_counts_from_puts(short_p, long_p, param.call_put_ratio_pct, n_sc, long_c);
+  return true;
+}
+
+bool size_credit_structure(const WParam& param,
+                           const SyntheticQuote& qsc, const SyntheticQuote& qsp,
+                           const SyntheticQuote& qlc, const SyntheticQuote& qlp,
+                           bool hedge_sized, double target_net_puts,
+                           int& short_c, int& short_p, int& long_c, int& long_p,
+                           int& units_used) {
+  const double pct = param.call_put_ratio_pct;
+  int max_mult = std::max(1, param.max_wing_mult);
+  if (max_mult <= 1) return false;
+
+  if (!hedge_sized) {
+    int u = std::max(1, param.units);
+    short_p = param.n_put * u;
+    if (!choose_credit_wings_for_shorts(param, qsc, qsp, qlc, qlp, short_p,
+                                        long_p, long_c))
+      return false;
+    call_counts_from_puts(short_p, long_p, pct, short_c, long_c);
+    units_used = u;
+    return true;
+  }
+
+  // Overlay: keep net long puts ≈ target, pick the largest ratio (fewest
+  // shorts) that is still a credit after slip+commission.
+  int net = std::max(1, static_cast<int>(std::llround(target_net_puts)));
+  int min_sp = static_cast<int>(
+      std::ceil(static_cast<double>(net) / static_cast<double>(max_mult - 1)));
+  min_sp = std::max(1, min_sp);
+
+  auto ok_sp = [&](int n_sp) {
+    if (n_sp <= 0 || net > INT_MAX - n_sp) return false;
+    int n_lp = n_sp + net;
+    if (n_lp > n_sp * max_mult || n_lp <= n_sp) return false;
+    int n_sc = 0, n_lc = 0;
+    call_counts_from_puts(n_sp, n_lp, pct, n_sc, n_lc);
+    return is_credit_after_costs(param, qsc, qsp, qlc, qlp, n_sc, n_sp, n_lc,
+                                 n_lp);
+  };
+
+  // Bound the search: if even 1:1 all-in is a debit, no finite size works.
+  int probe = std::max(net, 1000);
+  int psc = 0, plc = 0;
+  call_counts_from_puts(probe, probe, pct, psc, plc);
+  double sproc = -(preview_leg_cash(param, qsc, -psc) +
+                   preview_leg_cash(param, qsp, -probe));
+  double lcost =
+      preview_leg_cash(param, qlc, plc) + preview_leg_cash(param, qlp, probe);
+  double haircut = std::max(0.0, param.credit_buffer);
+  double denom = sproc * (1.0 - haircut) - lcost;
+  if (!(denom > 1e-9)) return false;
+  double need = static_cast<double>(net) * (lcost / probe) / (denom / probe);
+  if (!(need > 0) || need > static_cast<double>(INT_MAX / 4)) return false;
+  int max_sp = std::max(min_sp, static_cast<int>(std::ceil(need)) + 16);
+  if (max_sp > INT_MAX - net) max_sp = INT_MAX - net;
+  if (!ok_sp(max_sp)) {
+    bool found = false;
+    int cap = (INT_MAX - net - max_sp > 64) ? max_sp + 64 : INT_MAX - net;
+    for (int sp = max_sp + 1; sp <= cap; ++sp) {
+      if (ok_sp(sp)) {
+        max_sp = sp;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return false;
+  }
+
+  int lo = min_sp, hi = max_sp;
+  while (lo < hi) {
+    int mid = lo + (hi - lo) / 2;
+    if (ok_sp(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  if (!ok_sp(lo)) return false;
+  short_p = lo;
+  long_p = short_p + net;
+  call_counts_from_puts(short_p, long_p, pct, short_c, long_c);
+  units_used = short_p;
+  return true;
 }
 
 std::pair<int, int> choose_wing_counts(const WParam& param,
                                        const SyntheticQuote& sc, const SyntheticQuote& sp,
                                        const SyntheticQuote& lc, const SyntheticQuote& lp) {
   int n_c = param.n_call, n_p = param.n_put;
-  // Hard rule: long wings must strictly outnumber short body for tail hedge.
-  // Fixed mode sizes totals via long/short ratio in open_w_structure (supports floats).
-  double slip = param.fixed.opt_slippage_percent;
-  double scp = trade_mid(sc, false, slip);
-  double spp = trade_mid(sp, false, slip);
-  double lcp = trade_mid(lc, true, slip);
-  double lpp = trade_mid(lp, true, slip);
+  // Theta: integer wing multiple from n+1 up to max_wing_mult.
+  // Credit sizing is in size_credit_structure (fractional ratio, all-in credit).
   int min_m = std::max(n_c, n_p) + 1;
   int max_m = std::max(min_m, std::max(n_c, n_p) * std::max(1, param.max_wing_mult));
   int best_c = std::max(n_c, min_m), best_p = std::max(n_p, min_m);
@@ -38,17 +185,6 @@ std::pair<int, int> choose_wing_counts(const WParam& param,
     return ((-n_c) * sc.theta + (-n_p) * sp.theta + mc * lc.theta + mp * lp.theta) * CONTRACT_SCALE;
   };
 
-  if (param.wing_mode == WingMode::Credit) {
-    double max_long = (scp * n_c + spp * n_p) * (1.0 - param.credit_buffer) * CONTRACT_SCALE;
-    for (int m = min_m; m <= max_m; ++m) {
-      int mc = std::max(n_c, m), mp = std::max(n_p, m);
-      double debit = (lcp * mc + lpp * mp) * CONTRACT_SCALE;
-      if (debit <= max_long + 1e-9) { best_c = mc; best_p = mp; }
-      else break;
-    }
-    return {best_c, best_p};
-  }
-  // theta
   for (int m = min_m; m <= max_m; ++m) {
     int mc = std::max(n_c, m), mp = std::max(n_p, m);
     if (net_theta(mc, mp) >= param.theta_threshold - 1e-9) { best_c = mc; best_p = mp; }
@@ -62,14 +198,12 @@ double open_leg(const WParam& param, Date date, double spot, PositionsAndStats& 
                 TradeLog* log) {
   if (num_contracts == 0) return 0;
   bool is_buy = num_contracts > 0;
-  double mid = quote.mid > 0 ? quote.mid : 0.5 * (quote.bid + quote.ask);
+  double mid = quote_mid(quote);
   double slip = param.fixed.opt_slippage_percent;
   double trade_px = is_buy ? mid * (1.0 + slip) : mid * (1.0 - slip);
   double opt_comm = param.fixed.opt_comm_per_contract;
   int n = std::abs(num_contracts);
-  int signed_dir = is_buy ? 1 : -1;
-  double cash_per = trade_px * CONTRACT_SCALE + (is_buy ? opt_comm : -opt_comm);
-  double cash_flow = signed_dir * cash_per * n;
+  double cash_flow = preview_leg_cash(param, quote, num_contracts);
 
   OptPosition pos;
   pos.opt_type = quote.put_call;
@@ -181,6 +315,17 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
     }
     std::tie(short_c, short_p, long_c, long_p) = size_fixed(u);
     stat.last_units_used = u;
+    // Call side is a percent of the (already sized) put side.
+    short_c = scale_calls_from_puts(short_p, param.call_put_ratio_pct);
+    long_c = scale_calls_from_puts(long_p, param.call_put_ratio_pct);
+    if (short_c > 0) long_c = std::max(long_c, short_c + 1);
+  } else if (param.wing_mode == WingMode::Credit) {
+    int u = 0;
+    if (!size_credit_structure(param, *sc, *sp, *lc, *lp, hedge_sized,
+                               target_net_puts, short_c, short_p, long_c,
+                               long_p, u))
+      return false;
+    stat.last_units_used = u;
   } else {
     auto [mc, mp] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
     int net_per_unit = mp - param.n_put;
@@ -196,12 +341,10 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
     long_c = mc * u;
     long_p = mp * u;
     stat.last_units_used = u;
+    short_c = scale_calls_from_puts(short_p, param.call_put_ratio_pct);
+    long_c = scale_calls_from_puts(long_p, param.call_put_ratio_pct);
+    if (short_c > 0) long_c = std::max(long_c, short_c + 1);
   }
-
-  // Call side is a percent of the (already sized) put side.
-  short_c = scale_calls_from_puts(short_p, param.call_put_ratio_pct);
-  long_c = scale_calls_from_puts(long_p, param.call_put_ratio_pct);
-  if (short_c > 0) long_c = std::max(long_c, short_c + 1);
 
   ++stat.structure_id;
   double entry = 0;

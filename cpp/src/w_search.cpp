@@ -233,13 +233,11 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units,
         for (double ldel : g.long_deltas) {
           if (!(0 < ldel && ldel < sdel && sdel < 1)) continue;
           for (auto& w : g.wings) {
-            // Hard rule: long > short. Fixed ratio must be > 1;
-            // credit/theta enforce the floor at runtime.
+            // Hard rule: long > short. Fixed ratio must be > 1.
+            // Credit: ratio in (1, max_wing_mult]; theta still sizes from n+1.
             if (w.mode == WingMode::Fixed && w.long_short_ratio <= 1.0) continue;
-            if (w.max_wing_mult < 2 &&
-                (w.mode == WingMode::Credit || w.mode == WingMode::Theta)) {
-              continue;
-            }
+            if (w.mode == WingMode::Credit && w.max_wing_mult <= 1) continue;
+            if (w.mode == WingMode::Theta && w.max_wing_mult < 2) continue;
             for (double hr : hedge_ratios) {
               for (double cp : g.call_put_ratio_pcts) {
                 if (!(cp > 0)) continue;
