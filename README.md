@@ -55,7 +55,7 @@ cpp/build/w_backtest \
   -y data/yield-curve-rates-1990-2024.csv \
   --short-dte 30 --long-dte 60 \
   --short-delta 0.40 --long-delta 0.10 \
-  --units 1 --balance 100000
+  --units 1
 ```
 
 Key arguments (see `w_backtest --help`):

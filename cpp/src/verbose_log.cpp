@@ -134,6 +134,7 @@ std::string day_header_text(const VerboseDay& d) {
   os << format_date(d.date)
      << " Spot: " << fmt_px(d.spot)
      << " | NLV: " << fmt_usd(d.nlv)
+     << " | Commission: " << fmt_usd(d.commission)
      << " | Peak: " << fmt_usd(d.peak)
      << " | MaxDD: " << fmt_pct(d.max_dd)
      << " | MaxDDDate: " << fmt_date_or_dash(d.max_dd_date)
@@ -174,19 +175,25 @@ void write_pos_table(std::ostream& out, const std::vector<VerbosePosRow>& rows) 
          "<th class=\"num\">Cost-Basis</th><th class=\"num\">Total</th>"
          "</tr></thead>\n<tbody>\n";
   for (const auto& r : rows) {
-    bool stock_sum = (r.type == "Stock" && !r.has_price && !r.has_cost_basis);
-    bool sum = (r.type == "Options" || r.type == "Cash" || r.type == "NLV" ||
-                stock_sum);
-    out << "<tr class=\"" << (sum ? (r.type == "NLV" ? "sum nlv" : "sum") : "")
-        << "\"><td>" << html_escape(r.type) << "</td>";
+    bool options_nlv = (r.type == "Options NLV");
+    bool stocks_nlv = (r.type == "Stocks NLV");
+    bool stock_like = (r.type == "Stock" || stocks_nlv);
+    bool sum = options_nlv || stocks_nlv || r.type == "Cash" || r.type == "NLV";
+    std::string cls;
+    if (sum) cls = (r.type == "NLV") ? "sum nlv" : "sum";
+    if (options_nlv) {
+      if (!cls.empty()) cls += " ";
+      cls += "opt-nlv";
+    }
+    out << "<tr class=\"" << cls << "\"><td>" << html_escape(r.type) << "</td>";
     out << "<td class=\"num\">";
     if (r.has_contracts) out << html_escape(fmt_qty(r.contracts));
     out << "</td><td class=\"num\">";
     if (r.has_strike) out << html_escape(fmt_strike(r.strike));
-    else if (r.type == "Stock") out << "N/A";
+    else if (stock_like) out << "N/A";
     out << "</td><td>";
     if (r.has_exp) out << format_date(r.exp_date);
-    else if (r.type == "Stock") out << "N/A";
+    else if (stock_like) out << "N/A";
     out << "</td><td class=\"num\">";
     if (r.has_price) out << html_escape(fmt_opt_px(r.price));
     out << "</td><td class=\"num\">";
@@ -287,6 +294,7 @@ table.book th, table.book td { border-bottom: 1px solid var(--line); padding: 3p
 table.book th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color:var(--muted); }
 table.book .num { text-align: right; font-variant-numeric: tabular-nums; }
 table.book tr.sum td { border-top: 1px solid var(--ink); font-weight: 650; }
+table.book tr.opt-nlv td { border-bottom: 2px solid var(--ink); }
 table.book tr.nlv td { border-bottom: 2px solid var(--ink); }
 .action { margin-top: 10px; font-weight: 650; }
 )CSS";
@@ -389,7 +397,6 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
     kv("--every-n", std::to_string(run.every_n));
     kv("--atm-band", fmt_num(run.atm_band));
     kv("--units", std::to_string(param.units));
-    kv("--balance", fmt_num(param.fixed.initial_balance));
     if (param.long_pos_mil > 0) {
       kv("--long-pos-mil", fmt_num(param.long_pos_mil));
       kv("--hedge-ratio", fmt_num(param.hedge_ratio));
@@ -431,7 +438,6 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
   kv("--units", std::to_string(param.units));
   kv("--m-call", fmt_num(param.m_call));
   kv("--m-put", fmt_num(param.m_put));
-  kv("--balance", fmt_num(param.fixed.initial_balance));
   if (param.long_pos_mil > 0) {
     kv("--long-pos-mil", fmt_num(param.long_pos_mil));
     kv("--hedge-ratio", fmt_num(param.hedge_ratio));

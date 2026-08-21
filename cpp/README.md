@@ -18,7 +18,7 @@ cmake --build build -j
 ./build/w_backtest \
   -i ../data/SPY_fixture_small.csv \
   -y ../data/yield-curve-rates-1990-2024.csv \
-  --short-dte 30 --long-dte 60 --units 1 --balance 100000 \
+  --short-dte 30 --long-dte 60 --units 1 \
   --roll-dte 0 --profit-take-pct 0.50 --loss-cut-pct 1.00 \
   --no-gamma-scalp --bench 20
 ```
@@ -32,7 +32,7 @@ cmake --build build -j
 | `-i <path>` | Options chain CSV (plain or `.csv.gz`). Required in practice; defaults to a small SPY fixture if omitted. |
 | `-y <path>` | Yield-curve CSV used for risk-free rates (and dividend yield lookups) in Merton/GBS pricing. |
 | `--iv-smile <path>` | IV smile CSV (default: `<data-dir>/<stem>-ivsmile.csv`). |
-| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<stem>-merge-split.csv`, beside `-i`). Scales option commission by remaining later split factors (2:1 then 7:1 → `1/14` of `--commission` before both, `1/7` between). Missing default file → unadjusted commission. |
+| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<stem>-merge-split.csv`, beside `-i`). Scales option and stock commissions by remaining later split factors (2:1 then 7:1 → `1/14` of today's rate before both, `1/7` between). Missing default file → unadjusted commissions. |
 | `--start-date YYYY-MM-DD` | Inclusive first session to load. Omit to use the first date in the file. |
 | `--end-date YYYY-MM-DD` | Inclusive last session to load. Omit to use the last date in the file. |
 | `--trade-every-n-days N` | Thin the calendar: keep every Nth trading session (default `1` = every day). |
@@ -52,8 +52,7 @@ The strategy sells a short-dated call+put body and buys longer-dated wings
 | `--m-call X` | In fixed wing mode: long/short **ratio** for calls (e.g. `1.3` → 13 longs per 10 shorts). Default `2`. |
 | `--m-put X` | In fixed wing mode: long/short **ratio** for puts. Default `2`. |
 | `--call-put-ratio-pct X` | Call contracts as a **percent of puts** (default `100` = equal). `--call-put-ratio-pct 20` with puts −100/+200 → calls −20/+40. |
-| `--balance X` | Options-book starting cash / NLV. Default `1e6` (`100000` in the example above). |
-| `--long-pos-mil X` | Buy-and-hold overlay in $millions (default `0`). Buys `X*1e6` notional on day 1; NLV/MaxDD include W + stock. Alias: `--long-pos`. On each W roll, net cash from close+open is converted to/from overlay stock (sell highest cost-basis lots if cash is needed; buy more stock if cash is freed). Year-end tax is paid by selling stock; unused capital losses carry forward. |
+| `--long-pos-mil X` | Starting capital in $millions (default `0` = options-only, `$1e6` cash). Buys `X*1e6` notional on day 1; NLV/MaxDD include W + stock. Alias: `--long-pos`. Opening W credit is held as cash (not swept into overlay). Excess cash above that credit buys overlay shares; a shortfall sells highest cost-basis lots. Year-end tax is paid from cash / by selling stock; unused capital losses carry forward. |
 | `--hedge-ratio X` | With long-pos: size W so net long puts ≈ `X × (shares/100)`. |
 | `--commission X` | Option commission in $/contract **today**. Default `1.7125`. Dates before later splits are scaled via `--merge-split`. |
 | `--slippage-pct X` | Option slippage as a **percent of mid** (e.g. `5` = 5%). Default `5`. |
@@ -81,7 +80,7 @@ At least one exit path should stay enabled or positions hold until the last bar
 Close **reasons** written in verbose mode: `dte_roll`, `expire`, `profit_take`,
 `loss_cut`, `final` (forced flatten on the last bar), plus `open` for option
 entries. Overlay stock: `overlay_open` (day-1 buy), `overlay_buy` / `overlay_sell`
-(rebalance leftover/short cash), `tax` (sell to pay year-end tax, and the tax
+(rebalance cash to the open W credit), `tax` (sell to pay year-end tax, and the tax
 row itself).
 
 #### Runtime / diagnostics
@@ -102,7 +101,7 @@ row itself).
 ./build/w_backtest \
   -i ../data/SPY_fixture_small.csv \
   -y ../data/yield-curve-rates-1990-2024.csv \
-  --short-dte 30 --long-dte 60 --units 1 --balance 100000 \
+  --short-dte 30 --long-dte 60 --units 1 \
   --verbose --verbose-out trades.csv
 ```
 
@@ -142,7 +141,7 @@ Columns:
 ./build/w_backtest \
   -i ../data/SPY_fixture_small.csv \
   -y ../data/yield-curve-rates-1990-2024.csv \
-  --short-dte 30 --long-dte 60 --units 1 --balance 100000 \
+  --short-dte 30 --long-dte 60 --units 1 \
   --verbose-log trades.html
 ```
 
@@ -150,8 +149,8 @@ Each day with a buy/sell is nested under year → day. Days start folded (`[+]` 
 
 Each day shows:
 
-- Header: date, spot, NLV, peak, max drawdown (and date), ST/LT loss carry, ST/LT YTD gain, buy-and-hold NLV / maxDD / maxDD date
-- Position table: option legs (mark-to-market), options total, stock, cash, NLV
+- Header: date, spot, NLV, commission, peak, max drawdown (and date), ST/LT loss carry, ST/LT YTD gain, buy-and-hold NLV / maxDD / maxDD date
+- Position table: option legs (mark-to-market), **Options NLV**, **Stocks NLV**, cash, NLV
 - Actions: **Open W Strategy**, **Close W Strategy** (reason + P/L), stock buy/sell (shares, price, reason), year-end tax
 
 `--verbose-log` can be combined with `--verbose` / `--verbose-out` to also write the CSV.
@@ -207,13 +206,12 @@ Or call `w_search` directly:
 | `-y <path>` | Yield-curve CSV. |
 | `--cache <path>` | Binary dataset cache path (built automatically if missing). |
 | `--iv-smile <path>` | IV smile CSV (default: `<data-dir>/<SYM>-ivsmile.csv`). |
-| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<SYM>-merge-split.csv`, same directory as `-i`). Scales option commission by the product of **later** split factors: after a 2:1 then 7:1, commission before both is `1/14` of `--commission`, and `1/7` between the two splits. Missing default file → unadjusted commission. |
+| `--merge-split <path>` | Merge/split CSV (default: `<data-dir>/<SYM>-merge-split.csv`, same directory as `-i`). Scales option and stock commissions by the product of **later** split factors: after a 2:1 then 7:1, rates before both are `1/14` of today's, and `1/7` between the two splits. Missing default file → unadjusted commissions. |
 | `--start-date` / `--end-date` | Inclusive date window for the search sample. |
 | `--every-n N` | Session thinning (default `5`) — keeps every Nth trading day to speed the grid. |
 | `--atm-band X` | Keep strikes within ±`X` fraction of spot when loading (default `0.20` = ±20%). |
 | `--units N` | Structure size for every grid config (default `10`). Ignored when `--long-pos-mil > 0` (size comes from hedge ratio). |
-| `--balance X` | Options-book starting cash for each backtest (default `1e6`). |
-| `--long-pos-mil X` | Buy-and-hold overlay in **$millions** (default `0` = off). Starts with `X*1e6` cash, buys that notional of the symbol on day 1, holds to end. Combined NLV/MaxDD = W-strategy + long stock. Prints a buy-and-hold-only baseline. Alias: `--long-pos`. |
+| `--long-pos-mil X` | Starting capital in **$millions** (default `0` = options-only). Starts with `X*1e6` cash, buys that notional of the symbol on day 1. Opening W credit is held as cash. Combined NLV/MaxDD = W-strategy + long stock. Prints a buy-and-hold-only baseline. Alias: `--long-pos`. |
 | `--hedge-ratio X` | Single hedge ratio (only with long-pos). Net long puts (`long − short` put contracts) protect `X × (shares/100)` of the long. |
 | `--hedge-ratios a,b,..` | Grid of hedge ratios when long-pos is on (default `0.5,1,1.5,2`). |
 | `--call-put-ratio-pct X` | Single value: call contracts as % of puts (`100` = equal). |

@@ -847,7 +847,7 @@ MergeSplitHistory resolve_merge_split(const std::string& options_csv_path,
   if (!explicit_path.empty())
     throw std::runtime_error("cannot open merge-split file: " + path);
   std::cerr << "No merge-split file at " << path
-            << "; using unadjusted option commission\n";
+            << "; using unadjusted option and stock commissions\n";
   return {};
 }
 

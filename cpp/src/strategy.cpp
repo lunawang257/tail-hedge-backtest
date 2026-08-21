@@ -418,7 +418,7 @@ void close_all_stock(const WParam& param, Date date, double spot,
     shares += p.num_shares;
   }
   if (std::abs(shares) < 1e-9) return;
-  double stock_comm = param.fixed.stock_comm_per_share;
+  double stock_comm = param.fixed.stock_commission(date);
   if (shares > 0) {
     double close_px = spot - stock_comm;
     auto [gain, avg] = stat.close_stock_positions(
@@ -457,7 +457,7 @@ void open_buy_and_hold(const WParam& param, Date date, double spot,
                        PositionsAndStats& stat, TradeLog* log) {
   double notional = param.long_pos_mil * 1e6;
   if (notional <= 0 || spot <= 0) return;
-  double stock_comm = param.fixed.stock_comm_per_share;
+  double stock_comm = param.fixed.stock_commission(date);
   // Spend ~notional on shares (commission included in cash outlay).
   double shares = std::floor(notional / (spot + stock_comm));
   if (shares < 1.0) return;
@@ -471,16 +471,16 @@ void open_buy_and_hold(const WParam& param, Date date, double spot,
 
 // Pure buy-and-hold of the underlying (no W-strategy) for baseline metrics.
 void buy_and_hold_baseline_impl(const OptionsDataset& ds, double long_pos_mil,
-                                double stock_comm_per_share,
-                                BacktestResult& result) {
+                                const FixedParam& fp, BacktestResult& result) {
   double notional = long_pos_mil * 1e6;
   if (notional <= 0 || ds.dates.empty()) return;
   Date start = ds.dates.front();
   Date end = ds.dates.back();
   double spot0 = ds.spot(start);
-  double shares = std::floor(notional / (spot0 + stock_comm_per_share));
+  double entry_comm = fp.stock_commission(start);
+  double shares = std::floor(notional / (spot0 + entry_comm));
   if (shares < 1.0) return;
-  double cash = notional - (spot0 + stock_comm_per_share) * shares;
+  double cash = notional - (spot0 + entry_comm) * shares;
   double peak = notional;
   double max_dd = 0;
   for (Date date : ds.dates) {
@@ -493,8 +493,9 @@ void buy_and_hold_baseline_impl(const OptionsDataset& ds, double long_pos_mil,
     }
   }
   double last_spot = ds.spot(end);
-  // Mark-to-market final, net of exit commission.
-  double final_nlv = cash + shares * last_spot - stock_comm_per_share * shares;
+  // Mark-to-market final, net of exit commission on the last session.
+  double exit_comm = fp.stock_commission(end);
+  double final_nlv = cash + shares * last_spot - exit_comm * shares;
   double years = std::max(days_between(start, end) / YEAR_FRAC, 1e-6);
   double total_return = final_nlv / notional;
   double annual = (total_return > 0)
@@ -545,22 +546,30 @@ double tax_on_net(const NetGains& n, const FixedParam& fp) {
 }
 
 // After each W open/close, option cash has already been applied (debit
-// deducted, credit added). Convert leftover cash into overlay shares, or sell
-// highest-cost lots if cash is short. Avoids a silent margin loan (which is
-// what made MaxDrawdown exceed 100%).
+// deducted, credit added). Drive overlay cash to the opening W credit (or
+// to 0 when no structure is open / the structure was a debit). Excess cash
+// buys overlay shares; a shortfall sells highest-cost lots. Avoids a silent
+// margin loan (which is what made MaxDrawdown exceed 100%).
+double overlay_cash_target(const PositionsAndStats& stat) {
+  if (stat.opt_list.empty() || !(stat.structure_entry_cash < 0)) return 0;
+  return -stat.structure_entry_cash;
+}
+
 void rebalance_overlay_cash(const WParam& param, Date date, double spot,
                             PositionsAndStats& stat, TradeLog* log) {
   if (param.long_pos_mil <= 0) return;
-  double comm = param.fixed.stock_comm_per_share;
-  if (stat.cash < -1e-9)
-    stat.sell_overlay_hifo(-stat.cash, spot, date, comm, log, "overlay_sell");
-  else if (stat.cash > 0)
-    stat.buy_overlay(stat.cash, spot, date, comm, log, "overlay_buy");
+  double comm = param.fixed.stock_commission(date);
+  double target = overlay_cash_target(stat);
+  if (stat.cash < target - 1e-9)
+    stat.sell_overlay_hifo(target - stat.cash, spot, date, comm, log,
+                           "overlay_sell");
+  else if (stat.cash > target + 1e-9)
+    stat.buy_overlay(stat.cash - target, spot, date, comm, log, "overlay_buy");
 }
 
 void year_end_tax(const WParam& param, Date date, double spot,
                   PositionsAndStats& stat, bool invest_leftover, TradeLog* log) {
-  const double comm = param.fixed.stock_comm_per_share;
+  const double comm = param.fixed.stock_commission(date);
   const bool overlay = param.long_pos_mil > 0;
 
   // Selling stock to fund tax realizes more gain/loss and can change the bill.
@@ -605,8 +614,8 @@ void year_end_tax(const WParam& param, Date date, double spot,
   stat.annual_st_capital_gain = 0;
   stat.annual_lt_capital_gain = 0;
 
-  if (invest_leftover && overlay && stat.cash > 0)
-    stat.buy_overlay(stat.cash, spot, date, comm, log, "overlay_buy");
+  if (invest_leftover && overlay)
+    rebalance_overlay_cash(param, date, spot, stat, log);
 }
 
 void calc_drawdown(PositionsAndStats& stat, Date date, double equity) {
@@ -675,7 +684,7 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     rows.push_back(r);
   }
   VerbosePosRow opt_sum;
-  opt_sum.type = "Options";
+  opt_sum.type = "Options NLV";
   opt_sum.total = opt_total;
   rows.push_back(opt_sum);
 
@@ -698,16 +707,18 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
   }
   if (n_lots == 0) {
     VerbosePosRow stk;
-    stk.type = "Stock";
+    stk.type = "Stocks NLV";
     stk.contracts = 0;
     stk.has_contracts = true;
     stk.price = spot;
     stk.has_price = true;
     stk.total = 0;
     rows.push_back(stk);
-  } else if (n_lots > 1) {
+  } else if (n_lots == 1) {
+    rows.back().type = "Stocks NLV";
+  } else {
     VerbosePosRow stk_sum;
-    stk_sum.type = "Stock";
+    stk_sum.type = "Stocks NLV";
     stk_sum.contracts = stat.total_shares();
     stk_sum.has_contracts = true;
     stk_sum.total = stock_mtm;
@@ -807,6 +818,7 @@ struct VerboseRecorder {
     cur.bh_nlv = bh.nlv(spot);
     cur.bh_max_dd = bh.max_dd;
     cur.bh_max_dd_date = bh.max_dd_date;
+    cur.commission = stat.total_commission;
     if (!snapped) snapshot(stat, date, spot, true);
   }
 
@@ -907,8 +919,8 @@ struct VerboseRecorder {
 }  // namespace
 
 void buy_and_hold_baseline(const OptionsDataset& ds, double long_pos_mil,
-                           double stock_comm_per_share, BacktestResult& result) {
-  buy_and_hold_baseline_impl(ds, long_pos_mil, stock_comm_per_share, result);
+                           const FixedParam& fp, BacktestResult& result) {
+  buy_and_hold_baseline_impl(ds, long_pos_mil, fp, result);
 }
 
 BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool verbose) {
@@ -919,11 +931,11 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
     return result;
   }
   const double long_pos_dollars = std::max(0.0, param.long_pos_mil) * 1e6;
-  const double initial_capital = param.fixed.initial_balance + long_pos_dollars;
+  const double initial_capital =
+      long_pos_dollars > 0 ? long_pos_dollars : param.fixed.initial_balance;
 
   if (long_pos_dollars > 0) {
-    buy_and_hold_baseline(ds, param.long_pos_mil,
-                          param.fixed.stock_comm_per_share, result);
+    buy_and_hold_baseline(ds, param.long_pos_mil, param.fixed, result);
   }
 
   PositionsAndStats stat;
@@ -936,7 +948,7 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
     double bh_notional =
         long_pos_dollars > 0 ? long_pos_dollars : param.fixed.initial_balance;
     rec.bh.init(ds.dates.front(), ds.spot(ds.dates.front()), bh_notional,
-                param.fixed.stock_comm_per_share);
+                param.fixed.stock_commission(ds.dates.front()));
   }
   auto log_mark = [&]() -> size_t { return log ? log->size() : 0; };
   auto rec_others = [&](size_t m, Date date, double spot) {

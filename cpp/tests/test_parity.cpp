@@ -129,6 +129,19 @@ int main(int argc, char** argv) {
     check("ms_remaining_before", h.remaining_factor(parse_date("2009-12-31")),
           14.0, 1e-12);
 
+    FixedParam fp;
+    fp.merge_split = h;
+    fp.stock_comm_per_share = 0.0035;
+    fp.opt_comm_per_contract = 1.7125;
+    check("stock_comm_before", fp.stock_commission(parse_date("2009-12-31")),
+          0.0035 / 14.0, 1e-12);
+    check("stock_comm_between", fp.stock_commission(parse_date("2012-06-01")),
+          0.0035 / 7.0, 1e-12);
+    check("stock_comm_after", fp.stock_commission(parse_date("2015-01-01")),
+          0.0035, 1e-12);
+    check("opt_comm_before", fp.option_commission(parse_date("2009-12-31")),
+          1.7125 / 14.0, 1e-12);
+
     const char* tmp = "/tmp/wbt-merge-split-test.csv";
     {
       std::ofstream out(tmp);

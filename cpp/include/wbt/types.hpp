@@ -73,8 +73,8 @@ struct SyntheticQuote {
   bool interpolated = false;
 };
 
-// Corporate action used to scale today's option commission back in time.
-// `factor` is new-shares / old-shares (2:1 split → 2; reverse 1:10 → 0.1).
+// Corporate action used to scale today's option and stock commissions back
+// in time. `factor` is new-shares / old-shares (2:1 split → 2; reverse 1:10 → 0.1).
 struct MergeSplitEvent {
   Date date = 0;
   double factor = 1.0;
@@ -103,6 +103,8 @@ struct MergeSplitHistory {
 };
 
 struct FixedParam {
+  // Options-only starting cash when long_pos_mil == 0. Overlay mode uses
+  // long_pos_mil * 1e6 as the sole starting capital (no extra cash book).
   double initial_balance = 1e6;
   // Defaults: CA + federal + NIIT stacked rates (percent via CLI).
   double long_term_tax = 0.371;   // holding > 1 year
@@ -116,6 +118,10 @@ struct FixedParam {
 
   double option_commission(Date as_of) const {
     return merge_split.scale_commission(opt_comm_per_contract, as_of);
+  }
+
+  double stock_commission(Date as_of) const {
+    return merge_split.scale_commission(stock_comm_per_share, as_of);
   }
 };
 
@@ -158,10 +164,10 @@ struct WParam {
     -0.30, -0.20, -0.15, -0.10, -0.05, 0.0,
     0.05, 0.10, 0.15, 0.20, 0.30
   };
-  // Buy-and-hold overlay (millions of USD). 0 = disabled (options-only book).
-  // When > 0: start with this cash, buy that notional of underlying on day 1,
-  // hold to end; NLV/MaxDD include W-strategy + stock. Structure size is then
-  // driven by hedge_ratio instead of units.
+  // Starting capital in $millions. 0 = options-only (uses initial_balance).
+  // When > 0: this is the entire book — buy that notional of underlying on
+  // day 1. Opening W credit is held as cash (not swept into overlay).
+  // NLV/MaxDD include W-strategy + stock. Structure size uses hedge_ratio.
   double long_pos_mil = 0;
   // Net long puts (long − short contracts) as a multiple of long-pos contracts
   // (shares/100). E.g. 1000 shares → 10 contracts; hedge_ratio=1.5 → 15 net
@@ -213,7 +219,7 @@ struct TradeRecord {
 enum class VerboseActionKind { OpenW, CloseW, BuyStock, SellStock, Tax };
 
 struct VerbosePosRow {
-  std::string type;  // Call, Put, Stock, Cash, Options, NLV
+  std::string type;  // Call, Put, Stock, Stocks NLV, Cash, Options NLV, NLV
   double contracts = 0;  // option contracts or stock shares
   double strike = 0;
   Date exp_date = 0;
@@ -251,6 +257,7 @@ struct VerboseDay {
   Date date = 0;
   double spot = 0;
   double nlv = 0;
+  double commission = 0;  // cumulative commission spent through this day
   double peak = 0;
   double max_dd = 0;
   Date max_dd_date = 0;

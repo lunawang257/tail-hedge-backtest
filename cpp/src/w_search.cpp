@@ -64,12 +64,11 @@ const char* wing_name(WingMode m) {
   return "?";
 }
 
-WParam to_param(const SearchConfig& c, double balance, const std::string& symbol,
+WParam to_param(const SearchConfig& c, const std::string& symbol,
                 double opt_comm, double opt_slip, double long_pos_mil,
                 double lt_tax, double st_tax,
                 const MergeSplitHistory& merge_split) {
   WParam p;
-  p.fixed.initial_balance = balance;
   p.fixed.symbol = symbol;
   p.fixed.opt_comm_per_contract = opt_comm;
   p.fixed.opt_slippage_percent = opt_slip;
@@ -401,18 +400,18 @@ void usage(const char* argv0) {
     << "  --iv-smile path.csv    IV smile CSV (default: <data-dir>/<SYM>-ivsmile.csv;\n"
     << "                         build if missing, reuse if present)\n"
     << "  --merge-split path.csv Merge/split history (default: <data-dir>/<SYM>-merge-split.csv).\n"
-    << "                         Scales option commission by remaining split factor:\n"
-    << "                         before 2:1 then 7:1 → 1/14 of --commission, between → 1/7\n"
+    << "                         Scales option and stock commissions by remaining split factor:\n"
+    << "                         before 2:1 then 7:1 → 1/14 of today's rate, between → 1/7\n"
     << "  --start-date YYYY-MM-DD\n"
     << "  --end-date YYYY-MM-DD\n"
     << "  --every-n N            Session thinning (default 5)\n"
     << "  --atm-band X           Strike band around spot (default 0.20)\n"
     << "  --units N              (default 10; ignored when --long-pos-mil > 0)\n"
-    << "  --balance X            Options-book starting cash (default 1e6)\n"
-    << "  --long-pos-mil X       Buy-and-hold overlay in $millions (default 0).\n"
+    << "  --long-pos-mil X       Starting capital in $millions (default 0).\n"
     << "                         Starts with X*1e6 cash, buys that notional of\n"
-    << "                         the symbol on day 1, holds to end. NLV/MaxDD\n"
-    << "                         are W-strategy + long stock. Prints B&H baseline.\n"
+    << "                         the symbol on day 1. Opening W credit is held\n"
+    << "                         as cash. NLV/MaxDD are W-strategy + long stock.\n"
+    << "                         Prints B&H baseline.\n"
     << "  --hedge-ratio X        Single hedge ratio (only with long-pos). Net long\n"
     << "                         puts protect X × long-pos contracts (shares/100).\n"
     << "  --hedge-ratios a,b,..  Grid of hedge ratios (default 0.5,1,1.5,2 when\n"
@@ -453,7 +452,6 @@ int main(int argc, char** argv) {
   int every_n = 5;
   double atm_band = 0.20;
   int units = 10;
-  double balance = 1e6;
   double long_pos_mil = 0;
   bool hedge_ratios_set = false;
   double opt_comm = 1.7125;
@@ -483,7 +481,6 @@ int main(int argc, char** argv) {
       else if (eq("--every-n")) every_n = std::atoi(need());
       else if (eq("--atm-band")) atm_band = std::atof(need());
       else if (eq("--units")) units = std::atoi(need());
-      else if (eq("--balance")) balance = std::atof(need());
       else if (eq("--long-pos-mil") || eq("--long-pos"))
         long_pos_mil = std::atof(need());
       else if (eq("--hedge-ratio")) {
@@ -599,8 +596,9 @@ int main(int argc, char** argv) {
   // Print buy-and-hold baseline once (same for every config).
   if (long_pos_mil > 0) {
     BacktestResult base;
-    buy_and_hold_baseline(ds, long_pos_mil, FixedParam{}.stock_comm_per_share,
-                          base);
+    FixedParam fp;
+    fp.merge_split = merge_split;
+    buy_and_hold_baseline(ds, long_pos_mil, fp, base);
     std::cerr << std::fixed << std::setprecision(2)
               << "Baseline buy-and-hold (" << long_pos_mil << "M "
               << symbol << "): annual=" << base.baseline_annual_return
@@ -621,7 +619,7 @@ int main(int argc, char** argv) {
       size_t i = next.fetch_add(1);
       if (i >= grid.size()) break;
       auto cfg = grid[i];
-      auto param = to_param(cfg, balance, symbol, opt_comm, opt_slip, long_pos_mil,
+      auto param = to_param(cfg, symbol, opt_comm, opt_slip, long_pos_mil,
                             lt_tax, st_tax, merge_split);
       auto t1 = std::chrono::steady_clock::now();
       auto bt = w_strategy(ds, param, false);
@@ -666,7 +664,7 @@ int main(int argc, char** argv) {
         [](const SearchResult& a, const SearchResult& b) {
           return a.score < b.score;
         });
-    auto param = to_param(best->cfg, balance, symbol, opt_comm, opt_slip,
+    auto param = to_param(best->cfg, symbol, opt_comm, opt_slip,
                           long_pos_mil, lt_tax, st_tax, merge_split);
     std::cerr << "Re-running best config for HTML verbose log...\n";
     auto bt = w_strategy(ds, param, true);

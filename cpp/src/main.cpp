@@ -27,8 +27,8 @@ static void usage(const char* argv0) {
     "  --iv-smile <path.csv>    IV smile CSV (default: <data-dir>/<stem>-ivsmile.csv;\n"
     "                           build if missing, reuse if present)\n"
     "  --merge-split <path.csv> Merge/split history (default: <data-dir>/<stem>-merge-split.csv).\n"
-    "                           Scales option commission by remaining split factor:\n"
-    "                           before 2:1 then 7:1 → 1/14 of --commission, between → 1/7\n"
+    "                           Scales option and stock commissions by remaining split factor:\n"
+    "                           before 2:1 then 7:1 → 1/14 of today's rate, between → 1/7\n"
     "  --cache <path.bin>       Binary options cache (load if present, else build+save)\n"
     "  --atm-band X             Keep strikes within ±X of spot when loading (default 0)\n"
     "\n"
@@ -41,10 +41,10 @@ static void usage(const char* argv0) {
     "                           ignored when --long-pos-mil > 0)\n"
     "  --m-call N               Fixed-mode long-call wing count (default 2)\n"
     "  --m-put N                Fixed-mode long-put wing count (default 2)\n"
-    "  --balance X              Options-book starting cash (default 1e6)\n"
-    "  --long-pos-mil X         Buy-and-hold overlay in $millions (default 0).\n"
+    "  --long-pos-mil X         Starting capital in $millions (default 0).\n"
     "                           Buys X*1e6 notional of the symbol on day 1;\n"
     "                           NLV/MaxDD = W-strategy + long stock.\n"
+    "                           Opening W credit is held as cash.\n"
     "  --hedge-ratio X          Net long puts protect X × long-pos contracts\n"
     "                           (shares/100). Only with long-pos-mil > 0.\n"
     "  --call-put-ratio-pct X   Call contracts as % of puts (default 100).\n"
@@ -158,7 +158,6 @@ int main(int argc, char** argv) {
     else if (eq("--short-delta")) param.short_delta = std::atof(need());
     else if (eq("--long-delta")) param.long_delta = std::atof(need());
     else if (eq("--units")) param.units = std::atoi(need());
-    else if (eq("--balance")) param.fixed.initial_balance = std::atof(need());
     else if (eq("--long-pos-mil") || eq("--long-pos"))
       param.long_pos_mil = std::atof(need());
     else if (eq("--hedge-ratio")) param.hedge_ratio = std::atof(need());
