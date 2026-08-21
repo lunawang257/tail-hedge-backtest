@@ -266,8 +266,11 @@ struct VerboseDay {
   double st_gain = 0;
   double lt_gain = 0;
   double bh_nlv = 0;
+  double bh_peak = 0;
   double bh_max_dd = 0;
   Date bh_max_dd_date = 0;
+  // Why this day appears in the HTML log: "Trades", "MaxDD", or "Trades & MaxDD".
+  std::string print_reason;
   std::vector<VerbosePosRow> positions;
   std::vector<VerboseAction> actions;
 };

@@ -781,6 +781,7 @@ struct VerboseRecorder {
   bool has_cur = false;
   bool snapped = false;
   bool snap_has_opts = false;
+  bool max_dd_updated = false;
   BhTracker bh;
 
   void ensure_day(Date d, double spot) {
@@ -792,7 +793,13 @@ struct VerboseRecorder {
       has_cur = true;
       snapped = false;
       snap_has_opts = false;
+      max_dd_updated = false;
     }
+  }
+
+  void note_max_dd(Date date, double spot) {
+    ensure_day(date, spot);
+    max_dd_updated = true;
   }
 
   void snapshot(const PositionsAndStats& stat, Date date, double spot, bool force) {
@@ -816,6 +823,7 @@ struct VerboseRecorder {
     cur.st_gain = stat.annual_st_capital_gain;
     cur.lt_gain = stat.annual_lt_capital_gain;
     cur.bh_nlv = bh.nlv(spot);
+    cur.bh_peak = bh.peak;
     cur.bh_max_dd = bh.max_dd;
     cur.bh_max_dd_date = bh.max_dd_date;
     cur.commission = stat.total_commission;
@@ -824,10 +832,17 @@ struct VerboseRecorder {
 
   void flush() {
     if (!has_cur) return;
-    if (!cur.actions.empty()) days.push_back(std::move(cur));
+    const bool trades = !cur.actions.empty();
+    if (trades || max_dd_updated) {
+      if (trades && max_dd_updated) cur.print_reason = "Trades & MaxDD";
+      else if (trades) cur.print_reason = "Trades";
+      else cur.print_reason = "MaxDD";
+      days.push_back(std::move(cur));
+    }
     has_cur = false;
     snapped = false;
     snap_has_opts = false;
+    max_dd_updated = false;
   }
 
   void add_open_w(const PositionsAndStats& stat) {
@@ -1077,6 +1092,8 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
     calc_drawdown(stat, date, equity);
     if (recp) {
       recp->bh.mark(date, spot);
+      if (stat.max_dd_date == date)
+        recp->note_max_dd(date, spot);
       if (recp->has_cur && recp->cur.date == date)
         recp->capture_end_stats(stat, date, spot);
     }

@@ -145,13 +145,13 @@ Columns:
   --verbose-log trades.html
 ```
 
-Each day with a buy/sell is nested under year → day. Days start folded (`[+]` to expand). The page toolbar has **Fold all** and **Unfold all**. A foldable **Reproduce command** at the top copies the full CLI that regenerates this file.
+Each day with a buy/sell **or a new max-drawdown trough** is nested under year → day. Days start folded (`[+]` to expand). The page toolbar has **Fold all** and **Unfold all**. A foldable **Reproduce command** at the top copies the full CLI that regenerates this file.
 
 Each day shows:
 
 - Header: date, spot, NLV, commission, peak, max drawdown (and date), ST/LT loss carry, ST/LT YTD gain, buy-and-hold NLV / maxDD / maxDD date
+- Actions (trade days): **Open W Strategy**, **Close W Strategy** (reason + P/L), stock buy/sell (shares, price, reason), year-end tax
 - Position table: option legs (mark-to-market), **Options NLV**, **Stocks NLV**, cash, NLV
-- Actions: **Open W Strategy**, **Close W Strategy** (reason + P/L), stock buy/sell (shares, price, reason), year-end tax
 
 `--verbose-log` can be combined with `--verbose` / `--verbose-out` to also write the CSV.
 

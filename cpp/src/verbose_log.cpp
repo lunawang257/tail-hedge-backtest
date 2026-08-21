@@ -116,7 +116,7 @@ const char* action_kind_title(VerboseActionKind k) {
 }
 
 std::string human_reason(const std::string& r) {
-  if (r == "overlay_open") return "buy-and-hold overlay";
+  if (r == "overlay_open") return "B&H overlay";
   if (r == "overlay_buy") return "W Strategy Profit";
   if (r == "overlay_sell") return "fund W cash";
   if (r == "tax") return "year-end tax";
@@ -133,6 +133,7 @@ std::string day_header_text(const VerboseDay& d) {
   std::ostringstream os;
   os << format_date(d.date)
      << " Spot: " << fmt_px(d.spot)
+     << " | Reason: " << (d.print_reason.empty() ? "—" : d.print_reason)
      << " | NLV: " << fmt_usd(d.nlv)
      << " | Commission: " << fmt_usd(d.commission)
      << " | Peak: " << fmt_usd(d.peak)
@@ -142,9 +143,10 @@ std::string day_header_text(const VerboseDay& d) {
      << " | LtLossCarry: " << fmt_usd(d.lt_loss_carry)
      << " | StGain: " << fmt_usd(d.st_gain)
      << " | LtGain: " << fmt_usd(d.lt_gain)
-     << " | buy-and-hold NLV: " << fmt_usd(d.bh_nlv)
-     << " | buy-and-hold maxDD: " << fmt_pct(d.bh_max_dd)
-     << " | buy-and-hold maxDD Date: " << fmt_date_or_dash(d.bh_max_dd_date);
+     << " | B&H NLV: " << fmt_usd(d.bh_nlv)
+     << " | B&H Peak: " << fmt_usd(d.bh_peak)
+     << " | B&H maxDD: " << fmt_pct(d.bh_max_dd)
+     << " | B&H maxDD Date: " << fmt_date_or_dash(d.bh_max_dd_date);
   return os.str();
 }
 
@@ -231,8 +233,8 @@ void write_close_table(std::ostream& out, const std::vector<VerboseActionLeg>& l
          "<thead><tr>"
          "<th>Type</th><th class=\"num\">Contracts</th><th class=\"num\">Strike</th>"
          "<th>Expiration</th><th class=\"num\">Cost-Basis</th>"
-         "<th class=\"num\">Price</th><th class=\"num\">P/L</th>"
-         "<th class=\"num\">Total</th>"
+         "<th class=\"num\">Price</th><th class=\"num\">P/L / share</th>"
+         "<th class=\"num\">Total P/L</th>"
          "</tr></thead>\n<tbody>\n";
   for (const auto& L : legs) {
     out << "<tr><td>" << html_escape(L.type) << "</td>"
@@ -513,7 +515,7 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
       << " rolls=" << result.num_rolls
       << " tax=" << fmt_usd(result.total_tax) << "</div>\n";
   if (param.long_pos_mil > 0) {
-    out << "<div>buy-and-hold annual=" << fmt_pct(result.baseline_annual_return)
+    out << "<div>B&amp;H annual=" << fmt_pct(result.baseline_annual_return)
         << " maxDD=" << fmt_pct(result.baseline_max_drawdown)
         << " finalNLV=" << fmt_usd(result.baseline_final_nlv)
         << "</div>\n";
@@ -539,8 +541,6 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
     out << "<details class=\"day\">\n<summary><span class=\"pm\"></span>"
         << "<span class=\"lbl\">" << html_escape(day_header_text(day))
         << "</span></summary>\n<div class=\"body\">\n";
-    out << "<h3>Position Table</h3>\n";
-    write_pos_table(out, day.positions);
     for (const auto& a : day.actions) {
       out << "<div class=\"action\">" << html_escape(action_title(a)) << "</div>\n";
       if (a.kind == VerboseActionKind::OpenW && !a.legs.empty())
@@ -548,6 +548,8 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
       else if (a.kind == VerboseActionKind::CloseW && !a.legs.empty())
         write_close_table(out, a.legs);
     }
+    out << "<h3>Position Table</h3>\n";
+    write_pos_table(out, day.positions);
     out << "</div></details>\n";
   }
   close_year();
