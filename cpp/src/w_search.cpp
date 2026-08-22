@@ -113,7 +113,7 @@ WParam to_param(const SearchConfig& c, const std::string& symbol,
 //   --short-deltas 0.45
 //   --long-deltas 0.08,0.12
 //   --wings fixed:2,fixed:1.3,credit
-//   --roll-dtes 0
+//   --roll-dtes 0,7,14,21
 //   --profit-takes off,0.75
 //   --loss-cuts off
 // ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ struct GridSpec {
     {WingMode::Theta, 2.0, 0.02, 0.0, 4},
   };
   // -1 in profit_takes / loss_cuts means that exit path is disabled
-  std::vector<int> roll_dtes = {0};
+  std::vector<int> roll_dtes = {0, 7, 14, 21};
   std::vector<double> profit_takes = {-1.0, 5};
   std::vector<double> loss_cuts = {-1.0};
   // Only used when long_pos_mil > 0; otherwise grid uses a single 0 entry.
@@ -243,6 +243,8 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units,
               for (double cp : g.call_put_ratio_pcts) {
                 if (!(cp > 0)) continue;
                 for (int rd : g.roll_dtes) {
+                  // Rolling at/after the short tenor would never hold the body.
+                  if (rd >= sd) continue;
                   for (double pt : g.profit_takes) {
                     for (double lc : g.loss_cuts) {
                       SearchConfig c;
@@ -482,7 +484,7 @@ void usage(const char* argv0) {
     << "  --short-deltas 0.35,0.45\n"
     << "  --long-deltas 0.08,0.12\n"
     << "  --wings fixed:2,fixed:1.3,credit,theta\n"
-    << "  --roll-dtes 0\n"
+    << "  --roll-dtes 0,7,14,21\n"
     << "  --profit-takes off,0.75\n"
     << "  --loss-cuts off\n"
     << "  --call-put-ratio-pcts 100,50,25\n";
