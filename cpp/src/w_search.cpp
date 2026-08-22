@@ -355,40 +355,87 @@ OptionsDataset ensure_cache(const std::string& csv_path, const std::string& cach
   return ds;
 }
 
+std::string fmt_trim(double x, int prec = 6) {
+  std::ostringstream os;
+  os << std::fixed << std::setprecision(prec) << x;
+  std::string s = os.str();
+  if (s.find('.') != std::string::npos) {
+    while (!s.empty() && s.back() == '0') s.pop_back();
+    if (!s.empty() && s.back() == '.') s.pop_back();
+  }
+  if (s == "-0") return "0";
+  return s;
+}
+
+std::string csv_quote(const std::string& s) {
+  bool need = false;
+  for (char c : s) {
+    if (c == '"' || c == ',' || c == '\n' || c == '\r') {
+      need = true;
+      break;
+    }
+  }
+  if (!need) return s;
+  std::string out;
+  out.reserve(s.size() + 2);
+  out.push_back('"');
+  for (char c : s) {
+    if (c == '"') out += "\"\"";
+    else out += c;
+  }
+  out.push_back('"');
+  return out;
+}
+
 void write_csv(const std::string& path, std::vector<SearchResult>& rows,
-               double long_pos_mil) {
+               const std::string& symbol, double opt_comm, double opt_slip,
+               double long_pos_mil, double lt_tax, double st_tax,
+               const MergeSplitHistory& merge_split,
+               const VerboseRunInfo& run) {
   std::sort(rows.begin(), rows.end(),
             [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
   std::ofstream out(path);
-  out << "shortDTE,longDTE,shortDelta,longDelta,wingMode,mCall,mPut,"
-         "creditBuffer,thetaThreshold,maxWingMult,rollDTE,rollOnExpiry,"
-         "enableDteRoll,enableProfitTake,profitTakePct,enableLossCut,lossCutPct,"
-         "units,hedgeRatio,callPutRatioPct,longPosMil,annualReturn,maxDrawdown,score,finalNLV,"
-         "totalTax,taxPct,"
+  out << "id,hedgeRatio,annualReturn,maxDrawdown,shortDTE,longDTE,shortDelta,longDelta,"
+         "wingMode,mCall,mPut,creditBuffer,thetaThreshold,maxWingMult,rollDTE,"
+         "rollOnExpiry,enableDteRoll,enableProfitTake,profitTakePct,enableLossCut,"
+         "lossCutPct,units,callPutRatioPct,longPosMil,score,finalNLV,totalTax,taxPct,"
          "baselineAnnualReturn,baselineMaxDrawdown,baselineFinalNLV,"
-         "longPosShares,unitsUsed,numRolls,elapsedSec\n";
-  out << std::fixed << std::setprecision(6);
-  for (auto& r : rows) {
-    out << r.cfg.short_dte << ',' << r.cfg.long_dte << ','
-        << r.cfg.short_delta << ',' << r.cfg.long_delta << ','
+         "longPosShares,unitsUsed,numRolls,elapsedSec,command\n";
+  for (size_t i = 0; i < rows.size(); ++i) {
+    auto& r = rows[i];
+    auto param = to_param(r.cfg, symbol, opt_comm, opt_slip, long_pos_mil,
+                          lt_tax, st_tax, merge_split);
+    VerboseRunInfo row_run = run;
+    row_run.html_log = symbol + "-" + std::to_string(i) + ".html";
+    out << i << ',' << fmt_trim(r.cfg.hedge_ratio) << ','
+        << fmt_trim(r.bt.annual_return) << ','
+        << fmt_trim(r.bt.max_drawdown) << ','
+        << r.cfg.short_dte << ',' << r.cfg.long_dte << ','
+        << fmt_trim(r.cfg.short_delta) << ',' << fmt_trim(r.cfg.long_delta) << ','
         << wing_name(r.cfg.wing_mode) << ','
-        << r.cfg.m_call << ',' << r.cfg.m_put << ','
-        << r.cfg.credit_buffer << ',' << r.cfg.theta_threshold << ','
+        << fmt_trim(r.cfg.m_call) << ',' << fmt_trim(r.cfg.m_put) << ','
+        << fmt_trim(r.cfg.credit_buffer) << ',' << fmt_trim(r.cfg.theta_threshold) << ','
         << r.cfg.max_wing_mult << ',' << r.cfg.roll_dte << ','
         << (r.cfg.roll_on_expiry ? 1 : 0) << ','
         << (r.cfg.enable_dte_roll ? 1 : 0) << ','
-        << (r.cfg.enable_profit_take ? 1 : 0) << ',' << r.cfg.profit_take_pct << ','
-        << (r.cfg.enable_loss_cut ? 1 : 0) << ',' << r.cfg.loss_cut_pct << ','
-        << r.cfg.units << ',' << r.cfg.hedge_ratio << ','
-        << r.cfg.call_put_ratio_pct << ',' << long_pos_mil << ','
-        << r.bt.annual_return << ',' << r.bt.max_drawdown << ',' << r.score << ','
-        << r.bt.final_nlv << ','
-        << r.bt.total_tax << ','
-        << tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv) << ','
-        << r.bt.baseline_annual_return << ',' << r.bt.baseline_max_drawdown << ','
-        << r.bt.baseline_final_nlv << ',' << r.bt.long_pos_shares << ','
+        << (r.cfg.enable_profit_take ? 1 : 0) << ','
+        << fmt_trim(r.cfg.profit_take_pct) << ','
+        << (r.cfg.enable_loss_cut ? 1 : 0) << ','
+        << fmt_trim(r.cfg.loss_cut_pct) << ','
+        << r.cfg.units << ','
+        << fmt_trim(r.cfg.call_put_ratio_pct) << ','
+        << fmt_trim(long_pos_mil) << ','
+        << fmt_trim(r.score) << ','
+        << fmt_trim(r.bt.final_nlv) << ','
+        << fmt_trim(r.bt.total_tax) << ','
+        << fmt_trim(tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv)) << ','
+        << fmt_trim(r.bt.baseline_annual_return) << ','
+        << fmt_trim(r.bt.baseline_max_drawdown) << ','
+        << fmt_trim(r.bt.baseline_final_nlv) << ','
+        << fmt_trim(r.bt.long_pos_shares) << ','
         << r.bt.units_used << ',' << r.bt.num_rolls << ','
-        << std::setprecision(2) << r.elapsed_sec << std::setprecision(6) << '\n';
+        << fmt_trim(r.elapsed_sec, 2) << ','
+        << csv_quote(reproduce_command(symbol, param, row_run, true)) << '\n';
   }
 }
 
@@ -425,7 +472,7 @@ void usage(const char* argv0) {
     << "  --st-tax-pct X         Short-term capital-gain tax % (default 54.1)\n"
     << "  --workers N            Threads (default hw concurrency)\n"
     << "  --out results.csv\n"
-    << "  --verbose-log <path>   After the grid, re-run the best-scoring config\n"
+    << "  --html-log <path>      After the grid, re-run the best-scoring config\n"
     << "                         and write a collapsible HTML trade log\n"
     << "  --limit N              Debug: only first N configs\n"
     << "\n"
@@ -446,7 +493,7 @@ void usage(const char* argv0) {
 int main(int argc, char** argv) {
   std::string symbol = "SPY";
   std::string input, yield = "data/yield-curve-rates-1990-2024.csv";
-  std::string cache_path, out_path, iv_smile_path, verbose_log_path;
+  std::string cache_path, out_path, iv_smile_path, html_log_path;
   std::string merge_split_path;
   Date start = 20180101, end = 20191231;
   int every_n = 5;
@@ -498,7 +545,7 @@ int main(int argc, char** argv) {
         st_tax = std::atof(need()) / 100.0;
       else if (eq("--workers")) workers = std::atoi(need());
       else if (eq("--out")) out_path = need();
-      else if (eq("--verbose-log")) verbose_log_path = need();
+      else if (eq("--html-log")) html_log_path = need();
       else if (eq("--limit")) limit = std::atoi(need());
       else if (eq("--short-dtes")) grid_spec.short_dtes = parse_ints(need());
       else if (eq("--long-dtes")) grid_spec.long_dtes = parse_ints(need());
@@ -656,9 +703,23 @@ int main(int argc, char** argv) {
   for (auto& th : threads) th.join();
 
   auto t_end = std::chrono::steady_clock::now();
-  write_csv(out_path, results, long_pos_mil);
 
-  if (!verbose_log_path.empty() && !results.empty()) {
+  VerboseRunInfo run;
+  run.argv0 = argv[0];
+  run.search = true;
+  run.input = input;
+  run.yield = yield;
+  run.cache = cache_path;
+  run.iv_smile = iv_smile_path;
+  run.merge_split = merge_split_path;
+  run.start = start;
+  run.end = end;
+  run.every_n = every_n;
+  run.atm_band = atm_band;
+  write_csv(out_path, results, symbol, opt_comm, opt_slip, long_pos_mil, lt_tax,
+            st_tax, merge_split, run);
+
+  if (!html_log_path.empty() && !results.empty()) {
     auto best = std::max_element(
         results.begin(), results.end(),
         [](const SearchResult& a, const SearchResult& b) {
@@ -666,26 +727,14 @@ int main(int argc, char** argv) {
         });
     auto param = to_param(best->cfg, symbol, opt_comm, opt_slip,
                           long_pos_mil, lt_tax, st_tax, merge_split);
-    std::cerr << "Re-running best config for HTML verbose log...\n";
+    std::cerr << "Re-running best config for HTML log...\n";
     auto bt = w_strategy(ds, param, true);
-    VerboseRunInfo run;
-    run.argv0 = argv[0];
-    run.search = true;
-    run.input = input;
-    run.yield = yield;
-    run.cache = cache_path;
-    run.iv_smile = iv_smile_path;
-    run.merge_split = merge_split_path;
-    run.verbose_log = verbose_log_path;
-    run.start = start;
-    run.end = end;
-    run.every_n = every_n;
-    run.atm_band = atm_band;
-    if (write_verbose_html(verbose_log_path, symbol, param, bt, run))
-      std::cerr << "Wrote HTML verbose log (" << bt.verbose_log.size()
-                << " days) to " << verbose_log_path << "\n";
+    run.html_log = html_log_path;
+    if (write_verbose_html(html_log_path, symbol, param, bt, run))
+      std::cerr << "Wrote HTML log (" << bt.verbose_log.size()
+                << " days) to " << html_log_path << "\n";
     else
-      std::cerr << "Failed to write HTML verbose log: " << verbose_log_path
+      std::cerr << "Failed to write HTML log: " << html_log_path
                 << "\n";
   }
 
@@ -695,7 +744,7 @@ int main(int argc, char** argv) {
   std::cerr << "=== TOP 10 " << symbol << " ===\n";
   for (size_t i = 0; i < results.size() && i < 10; ++i) {
     auto& r = results[i];
-    std::cerr << "  score=" << r.score << " ret=" << r.bt.annual_return
+    std::cerr << "  id=" << i << " score=" << r.score << " ret=" << r.bt.annual_return
               << "% dd=" << r.bt.max_drawdown << "% tax="
               << tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv) << "%NLV"
               << " | sDTE=" << r.cfg.short_dte

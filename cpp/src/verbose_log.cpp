@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace wbt {
@@ -135,19 +137,138 @@ std::string day_header_text(const VerboseDay& d) {
      << " Spot: " << fmt_px(d.spot)
      << " | Reason: " << (d.print_reason.empty() ? "—" : d.print_reason)
      << " | NLV: " << fmt_usd(d.nlv)
-     << " | Commission: " << fmt_usd(d.commission)
-     << " | Peak: " << fmt_usd(d.peak)
      << " | MaxDD: " << fmt_pct(d.max_dd)
-     << " | MaxDDDate: " << fmt_date_or_dash(d.max_dd_date)
-     << " | StLossCarry: " << fmt_usd(d.st_loss_carry)
-     << " | LtLossCarry: " << fmt_usd(d.lt_loss_carry)
-     << " | StGain: " << fmt_usd(d.st_gain)
-     << " | LtGain: " << fmt_usd(d.lt_gain)
-     << " | B&H NLV: " << fmt_usd(d.bh_nlv)
-     << " | B&H Peak: " << fmt_usd(d.bh_peak)
-     << " | B&H maxDD: " << fmt_pct(d.bh_max_dd)
-     << " | B&H maxDD Date: " << fmt_date_or_dash(d.bh_max_dd_date);
+     << " | B&H maxDD: " << fmt_pct(d.bh_max_dd);
   return os.str();
+}
+
+std::string fmt_comm_pcnt(double commission, double nlv) {
+  if (!(std::abs(nlv) > 1e-9)) return "—";
+  std::ostringstream os;
+  os << std::fixed << std::setprecision(4) << (100.0 * commission / nlv) << "%";
+  return os.str();
+}
+
+void write_perf_stats_row(std::ostream& out, const char* name, double nlv,
+                          double peak, double bh_peak, double max_dd,
+                          double bh_max_dd, Date max_dd_date,
+                          Date bh_max_dd_date, double max_dd_nlv,
+                          double bh_max_dd_nlv) {
+  out << "<tr><td>" << html_escape(name) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(nlv)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(peak)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(bh_peak)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_pct(max_dd)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_pct(bh_max_dd)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_date_or_dash(max_dd_date))
+      << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_date_or_dash(bh_max_dd_date))
+      << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(max_dd_nlv)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(bh_max_dd_nlv))
+      << "</td></tr>\n";
+}
+
+void write_comm_gain_stats_row(std::ostream& out, const char* name, double nlv,
+                               double commission, double st_loss_carry,
+                               double lt_loss_carry, double st_gain,
+                               double lt_gain) {
+  out << "<tr><td>" << html_escape(name) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(commission)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_comm_pcnt(commission, nlv))
+      << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(st_loss_carry)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(lt_loss_carry)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(st_gain)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(lt_gain)) << "</td></tr>\n";
+}
+
+void write_stats_table(std::ostream& out, const VerboseDay& d) {
+  out << "<h3>Stats</h3>\n"
+         "<table class=\"book stats\">\n"
+         "<thead><tr>"
+         "<th>Strat</th>"
+         "<th class=\"num\">NLV</th>"
+         "<th class=\"num\">Peak</th>"
+         "<th class=\"num\">B&amp;H Peak</th>"
+         "<th class=\"num\">MaxDD</th>"
+         "<th class=\"num\">B&amp;H MaxDD</th>"
+         "<th class=\"num\">MaxDD Date</th>"
+         "<th class=\"num\">B&amp;H MaxDD Date</th>"
+         "<th class=\"num\">MDD NLV</th>"
+         "<th class=\"num\">B&amp;H MDD NLV</th>"
+         "</tr></thead>\n<tbody>\n";
+  write_perf_stats_row(out, "W", d.nlv, d.peak, d.bh_peak, d.max_dd,
+                       d.bh_max_dd, d.max_dd_date, d.bh_max_dd_date,
+                       d.max_dd_nlv, d.bh_max_dd_nlv);
+  write_perf_stats_row(out, "B&H", d.bh_nlv, d.bh_peak, d.bh_peak, d.bh_max_dd,
+                       d.bh_max_dd, d.bh_max_dd_date, d.bh_max_dd_date,
+                       d.bh_max_dd_nlv, d.bh_max_dd_nlv);
+  out << "</tbody></table>\n"
+         "<table class=\"book stats\">\n"
+         "<thead><tr>"
+         "<th>Strat</th>"
+         "<th class=\"num\">Comm</th>"
+         "<th class=\"num\">Comm%</th>"
+         "<th class=\"num\">STLoss</th>"
+         "<th class=\"num\">LTLoss</th>"
+         "<th class=\"num\">STGain</th>"
+         "<th class=\"num\">LTGain</th>"
+         "</tr></thead>\n<tbody>\n";
+  write_comm_gain_stats_row(out, "W", d.nlv, d.commission, d.st_loss_carry,
+                            d.lt_loss_carry, d.st_gain, d.lt_gain);
+  // Pure B&H never realizes gains, so carry / YTD gain stay at $0.
+  write_comm_gain_stats_row(out, "B&H", d.bh_nlv, d.bh_commission, 0, 0, 0, 0);
+  out << "</tbody></table>\n";
+}
+
+void write_column_legend(std::ostream& out) {
+  static const struct {
+    const char* abbr;
+    const char* full;
+    const char* zh;
+  } rows[] = {
+      {"Strat", "Strategy", "策略"},
+      {"W", "W tail-hedge strategy (with stock overlay)",
+       "W尾部对冲策略（含股票叠加）"},
+      {"B&H", "Buy-and-hold of the underlying", "标的买入持有"},
+      {"NLV", "Net liquidation value", "净清算价值"},
+      {"Comm", "Cumulative commission", "累计佣金"},
+      {"Comm%", "Commission as a percent of NLV", "佣金占净清算价值的百分比"},
+      {"Peak", "Peak net liquidation value", "净清算价值峰值"},
+      {"B&H Peak", "Buy-and-hold peak net liquidation value",
+       "买入持有净清算价值峰值"},
+      {"MaxDD", "Maximum drawdown", "最大回撤"},
+      {"B&H MaxDD", "Buy-and-hold maximum drawdown", "买入持有最大回撤"},
+      {"MaxDD Date", "Date of the maximum-drawdown trough", "最大回撤谷底日期"},
+      {"B&H MaxDD Date", "Date of the buy-and-hold maximum-drawdown trough",
+       "买入持有最大回撤谷底日期"},
+      {"MDD NLV", "Net liquidation value at the maximum-drawdown trough",
+       "最大回撤谷底时的净清算价值"},
+      {"B&H MDD NLV",
+       "Buy-and-hold net liquidation value at its maximum-drawdown trough",
+       "买入持有最大回撤谷底时的净清算价值"},
+      {"STLoss", "Short-term capital-loss carryover", "短期资本亏损结转"},
+      {"LTLoss", "Long-term capital-loss carryover", "长期资本亏损结转"},
+      {"STGain", "Year-to-date short-term capital gain",
+       "年初至今短期资本利得"},
+      {"LTGain", "Year-to-date long-term capital gain", "年初至今长期资本利得"},
+  };
+  out << "<details class=\"colkey\">\n"
+         "<summary>"
+         "<span class=\"pm\"></span>"
+         "<span class=\"lbl\">Column names</span>"
+         "</summary>\n"
+         "<table class=\"book colkey\">\n"
+         "<thead><tr><th>Short</th><th>Full name</th>"
+         "<th>Simplified Chinese</th></tr></thead>\n"
+         "<tbody>\n";
+  for (const auto& r : rows) {
+    out << "<tr><td>" << html_escape(r.abbr) << "</td><td>"
+        << html_escape(r.full) << "</td><td>" << html_escape(r.zh)
+        << "</td></tr>\n";
+  }
+  out << "</tbody></table>\n</details>\n";
 }
 
 std::string action_title(const VerboseAction& a) {
@@ -174,7 +295,8 @@ void write_pos_table(std::ostream& out, const std::vector<VerbosePosRow>& rows) 
          "<thead><tr>"
          "<th>Type</th><th class=\"num\">Contracts</th><th class=\"num\">Strike</th>"
          "<th>Expiration</th><th class=\"num\">Price</th>"
-         "<th class=\"num\">Cost-Basis</th><th class=\"num\">Total</th>"
+         "<th class=\"num\">Cost-Basis</th><th class=\"num\">Market Value</th>"
+         "<th class=\"num\">P&amp;L</th>"
          "</tr></thead>\n<tbody>\n";
   for (const auto& r : rows) {
     bool options_nlv = (r.type == "Options NLV");
@@ -199,9 +321,11 @@ void write_pos_table(std::ostream& out, const std::vector<VerbosePosRow>& rows) 
     out << "</td><td class=\"num\">";
     if (r.has_price) out << html_escape(fmt_opt_px(r.price));
     out << "</td><td class=\"num\">";
-    if (r.has_cost_basis) out << html_escape(fmt_px(r.cost_basis));
+    if (r.has_cost_basis) out << html_escape(fmt_usd(r.cost_basis));
     out << "</td><td class=\"num\">" << html_escape(fmt_usd(r.total))
-        << "</td></tr>\n";
+        << "</td><td class=\"num\">";
+    if (r.has_pnl) out << html_escape(fmt_usd(r.pnl));
+    out << "</td></tr>\n";
   }
   out << "</tbody></table>\n";
 }
@@ -254,7 +378,7 @@ const char* kCss = R"CSS(
 * { box-sizing: border-box; }
 body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
        color:var(--ink); background:var(--bg); line-height:1.45; }
-.wrap { max-width: 1200px; margin: 0 auto; padding: 16px 20px 48px; }
+.wrap { max-width: 1280px; margin: 0 auto; padding: 16px 20px 48px; }
 .toolbar { position: sticky; top: 0; z-index: 5; display:flex; gap:8px; align-items:center;
            flex-wrap:wrap; background:var(--bg); padding:10px 0 12px; border-bottom:1px solid var(--line); }
 .toolbar h1 { font-size: 1.05rem; margin:0 12px 0 0; font-weight:650; }
@@ -263,10 +387,12 @@ button { font: inherit; cursor:pointer; background:#fff; border:1px solid var(--
 button:hover { border-color: var(--acc); color: var(--acc); }
 .meta { color:var(--muted); font-size:0.9rem; margin:12px 0 16px; }
 .meta div { margin: 2px 0; }
-details.cmdbox { background:var(--card); border:1px solid var(--line);
+details.cmdbox, details.colkey { background:var(--card); border:1px solid var(--line);
   border-radius:8px; padding: 2px 8px 2px 4px; margin: 0 0 12px; }
-details.cmdbox > summary { align-items: center; width: 100%; }
+details.cmdbox > summary, details.colkey > summary { align-items: center; width: 100%; }
 details.cmdbox > summary .copy { margin-left: auto; flex: 0 0 auto; }
+table.book.colkey { min-width: 0; margin: 4px 8px 12px 28px; }
+table.book.colkey th { text-transform: none; }
 pre.cmd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: 0.82rem; color:var(--ink); background:#fff;
           border:1px solid var(--line); border-radius:6px; padding:10px 12px;
@@ -288,10 +414,12 @@ details[open] > summary > .pm::before { content: "[−]"; }
 .lbl { font-weight: 650; }
 .day summary .lbl { font-weight: 500; font-size: 0.92rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                     white-space: pre-wrap; }
-.body { padding: 4px 8px 12px 28px; }
+.body { padding: 4px 8px 12px 28px; overflow-x: auto; }
 h3 { font-size: 0.95rem; margin: 14px 0 6px; }
 table.book { border-collapse: collapse; width: auto; min-width: 640px; font-size: 0.88rem;
              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 10px; }
+table.book.stats { min-width: 0; }
+table.book.stats th { white-space: nowrap; text-transform: none; }
 table.book th, table.book td { border-bottom: 1px solid var(--line); padding: 3px 10px; text-align: left; }
 table.book th { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; color:var(--muted); }
 table.book .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -312,7 +440,7 @@ function copyReproduce(ev) {
   ev.stopPropagation();
   var pre = document.getElementById('reproduce-cmd');
   var btn = ev.currentTarget;
-  var text = pre ? pre.textContent : '';
+  var text = pre ? pre.textContent.replace(/\\\s*\n\s*/g, ' ').trim() : '';
   function done(ok) {
     btn.textContent = ok ? 'Copied' : 'Copy failed';
     setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
@@ -370,30 +498,52 @@ std::string fmt_num(double x) {
   return os.str();
 }
 
+// Path relative to the process cwd, using / separators. Falls back to `p`
+// if it cannot be expressed relative to pwd (e.g. different volume).
+std::string relpath_from_cwd(const std::string& p) {
+  if (p.empty()) return p;
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path abs = fs::absolute(fs::path(p), ec);
+  if (ec) return p;
+  fs::path cwd = fs::current_path(ec);
+  if (ec) return p;
+  fs::path rel = fs::relative(abs, cwd, ec);
+  if (ec || rel.empty()) return p;
+  std::string s = rel.generic_string();
+  if (s.empty() || s == ".") return p;
+  return s;
+}
+
 std::string wing_cli(const WParam& param) {
   if (param.wing_mode == WingMode::Credit) return "credit";
   if (param.wing_mode == WingMode::Theta) return "theta";
   return "fixed:" + fmt_num(param.m_call);
 }
 
+}  // namespace
+
 std::string reproduce_command(const std::string& symbol, const WParam& param,
-                              const VerboseRunInfo& run) {
+                              const VerboseRunInfo& run, bool compact) {
   const std::string bin =
       run.argv0.empty() ? (run.search ? "w_search" : "w_backtest") : run.argv0;
   std::ostringstream os;
-  auto flag = [&](const std::string& f) { os << " \\\n  " << f; };
+  const char* sep = compact ? " " : " \\\n  ";
+  auto flag = [&](const std::string& f) { os << sep << f; };
   auto kv = [&](const std::string& f, const std::string& v) {
-    os << " \\\n  " << f << " " << v;
+    os << sep << f << " " << v;
   };
 
-  os << sh_quote(bin);
+  auto path = [&](const std::string& p) { return sh_quote(relpath_from_cwd(p)); };
+
+  os << path(bin);
   if (run.search) {
     kv("--symbol", sh_quote(symbol));
-    if (!run.input.empty()) kv("-i", sh_quote(run.input));
-    if (!run.yield.empty()) kv("-y", sh_quote(run.yield));
-    if (!run.cache.empty()) kv("--cache", sh_quote(run.cache));
-    if (!run.iv_smile.empty()) kv("--iv-smile", sh_quote(run.iv_smile));
-    if (!run.merge_split.empty()) kv("--merge-split", sh_quote(run.merge_split));
+    if (!run.input.empty()) kv("-i", path(run.input));
+    if (!run.yield.empty()) kv("-y", path(run.yield));
+    if (!run.cache.empty()) kv("--cache", path(run.cache));
+    if (!run.iv_smile.empty()) kv("--iv-smile", path(run.iv_smile));
+    if (!run.merge_split.empty()) kv("--merge-split", path(run.merge_split));
     if (run.start) kv("--start-date", format_date(run.start));
     if (run.end) kv("--end-date", format_date(run.end));
     kv("--every-n", std::to_string(run.every_n));
@@ -418,16 +568,16 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
        param.enable_profit_take ? fmt_num(param.profit_take_pct) : "off");
     kv("--loss-cuts",
        param.enable_loss_cut ? fmt_num(param.loss_cut_pct) : "off");
-    if (!run.verbose_log.empty())
-      kv("--verbose-log", sh_quote(run.verbose_log));
+    if (!run.html_log.empty())
+      kv("--html-log", path(run.html_log));
     return os.str();
   }
 
-  if (!run.input.empty()) kv("-i", sh_quote(run.input));
-  if (!run.yield.empty()) kv("-y", sh_quote(run.yield));
-  if (!run.cache.empty()) kv("--cache", sh_quote(run.cache));
-  if (!run.iv_smile.empty()) kv("--iv-smile", sh_quote(run.iv_smile));
-  if (!run.merge_split.empty()) kv("--merge-split", sh_quote(run.merge_split));
+  if (!run.input.empty()) kv("-i", path(run.input));
+  if (!run.yield.empty()) kv("-y", path(run.yield));
+  if (!run.cache.empty()) kv("--cache", path(run.cache));
+  if (!run.iv_smile.empty()) kv("--iv-smile", path(run.iv_smile));
+  if (!run.merge_split.empty()) kv("--merge-split", path(run.merge_split));
   if (run.start) kv("--start-date", format_date(run.start));
   if (run.end) kv("--end-date", format_date(run.end));
   if (run.every_n != 1)
@@ -461,12 +611,10 @@ std::string reproduce_command(const std::string& symbol, const WParam& param,
   else
     flag("--no-loss-cut");
   flag(param.enable_gamma_scalp ? "--gamma-scalp" : "--no-gamma-scalp");
-  if (!run.verbose_log.empty())
-    kv("--verbose-log", sh_quote(run.verbose_log));
+  if (!run.html_log.empty())
+    kv("--html-log", path(run.html_log));
   return os.str();
 }
-
-}  // namespace
 
 bool write_verbose_html(const std::string& path, const std::string& symbol,
                         const WParam& param, const BacktestResult& result,
@@ -485,6 +633,8 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
       << "<button type=\"button\" onclick=\"foldAll()\">Fold all</button>\n"
       << "<button type=\"button\" onclick=\"unfoldAll()\">Unfold all</button>\n"
       << "</div>\n<div class=\"meta\">\n";
+
+  write_column_legend(out);
 
   out << "<details class=\"cmdbox\">\n"
          "<summary>"
@@ -541,6 +691,7 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
     out << "<details class=\"day\">\n<summary><span class=\"pm\"></span>"
         << "<span class=\"lbl\">" << html_escape(day_header_text(day))
         << "</span></summary>\n<div class=\"body\">\n";
+    write_stats_table(out, day);
     for (const auto& a : day.actions) {
       out << "<div class=\"action\">" << html_escape(action_title(a)) << "</div>\n";
       if (a.kind == VerboseActionKind::OpenW && !a.legs.empty())

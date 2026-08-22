@@ -633,6 +633,7 @@ void calc_drawdown(PositionsAndStats& stat, Date date, double equity) {
       stat.max_drawdown = dd;
       stat.max_drawdown_peak_date = format_date(date);
       stat.max_dd_date = date;
+      stat.max_dd_nlv = equity;
     }
   }
 }
@@ -666,10 +667,13 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
                                           double spot) {
   std::vector<VerbosePosRow> rows;
   double opt_total = 0;
+  double opt_cb = 0;
   for (const auto& opt : stat.opt_list) {
     double mark = stat.mark_option(opt, date, spot);
     double tot = static_cast<double>(opt.num_contracts) * mark * CONTRACT_SCALE;
+    double cb = opt.get_cost_basis();
     opt_total += tot;
+    opt_cb += cb;
     VerbosePosRow r;
     r.type = opt.opt_type == OptType::Call ? "Call" : "Put";
     r.contracts = opt.num_contracts;
@@ -680,15 +684,24 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     r.has_exp = true;
     r.price = mark;
     r.has_price = true;
+    r.cost_basis = cb;
+    r.has_cost_basis = true;
     r.total = tot;
+    r.pnl = tot - cb;
+    r.has_pnl = true;
     rows.push_back(r);
   }
   VerbosePosRow opt_sum;
   opt_sum.type = "Options NLV";
+  opt_sum.cost_basis = opt_cb;
+  opt_sum.has_cost_basis = true;
   opt_sum.total = opt_total;
+  opt_sum.pnl = opt_total - opt_cb;
+  opt_sum.has_pnl = true;
   rows.push_back(opt_sum);
 
   double stock_mtm = 0;
+  double stock_cb = 0;
   int n_lots = 0;
   for (const auto& p : stat.stocks) {
     if (std::abs(p.num_shares) < 1e-9) continue;
@@ -699,10 +712,13 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     stk.has_contracts = true;
     stk.price = spot;
     stk.has_price = true;
-    stk.cost_basis = p.open_price;
+    stk.cost_basis = p.num_shares * p.open_price;
     stk.has_cost_basis = true;
     stk.total = p.num_shares * spot;
+    stk.pnl = stk.total - stk.cost_basis;
+    stk.has_pnl = true;
     stock_mtm += stk.total;
+    stock_cb += stk.cost_basis;
     rows.push_back(stk);
   }
   if (n_lots == 0) {
@@ -712,7 +728,11 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     stk.has_contracts = true;
     stk.price = spot;
     stk.has_price = true;
+    stk.cost_basis = 0;
+    stk.has_cost_basis = true;
     stk.total = 0;
+    stk.pnl = 0;
+    stk.has_pnl = true;
     rows.push_back(stk);
   } else if (n_lots == 1) {
     rows.back().type = "Stocks NLV";
@@ -721,7 +741,11 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     stk_sum.type = "Stocks NLV";
     stk_sum.contracts = stat.total_shares();
     stk_sum.has_contracts = true;
+    stk_sum.cost_basis = stock_cb;
+    stk_sum.has_cost_basis = true;
     stk_sum.total = stock_mtm;
+    stk_sum.pnl = stock_mtm - stock_cb;
+    stk_sum.has_pnl = true;
     rows.push_back(stk_sum);
   }
 
@@ -744,6 +768,8 @@ struct BhTracker {
   double peak = 0;
   double max_dd = 0;
   Date max_dd_date = 0;
+  double max_dd_nlv = 0;
+  double commission = 0;
 
   void init(Date d, double spot, double notional, double comm) {
     on = notional > 0 && spot > 0;
@@ -752,12 +778,15 @@ struct BhTracker {
     if (shares < 1.0) {
       cash = notional;
       shares = 0;
+      commission = 0;
     } else {
       cash = notional - (spot + comm) * shares;
+      commission = comm * shares;
     }
     peak = notional;
     max_dd = 0;
     max_dd_date = d;
+    max_dd_nlv = cash + shares * spot;
   }
   void mark(Date d, double spot) {
     if (!on) return;
@@ -769,6 +798,7 @@ struct BhTracker {
       if (dd > max_dd) {
         max_dd = dd;
         max_dd_date = d;
+        max_dd_nlv = nlv;
       }
     }
   }
@@ -818,6 +848,7 @@ struct VerboseRecorder {
     cur.peak = stat.cur_peak;
     cur.max_dd = stat.max_drawdown;
     cur.max_dd_date = stat.max_dd_date ? stat.max_dd_date : date;
+    cur.max_dd_nlv = stat.max_dd_date ? stat.max_dd_nlv : stat.cur_peak;
     cur.st_loss_carry = stat.st_loss_carryover;
     cur.lt_loss_carry = stat.lt_loss_carryover;
     cur.st_gain = stat.annual_st_capital_gain;
@@ -826,6 +857,8 @@ struct VerboseRecorder {
     cur.bh_peak = bh.peak;
     cur.bh_max_dd = bh.max_dd;
     cur.bh_max_dd_date = bh.max_dd_date;
+    cur.bh_max_dd_nlv = bh.max_dd_nlv;
+    cur.bh_commission = bh.commission;
     cur.commission = stat.total_commission;
     if (!snapped) snapshot(stat, date, spot, true);
   }
@@ -1101,6 +1134,7 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
       // Account wiped out: stop, report 100% DD and zero terminal NLV.
       stat.max_drawdown = 100.0;
       stat.max_dd_date = date;
+      stat.max_dd_nlv = 0;
       stat.cash = 0;
       stat.opt_list.clear();
       stat.stocks.clear();

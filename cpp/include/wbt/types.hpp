@@ -224,13 +224,15 @@ struct VerbosePosRow {
   double strike = 0;
   Date exp_date = 0;
   double price = 0;
-  double cost_basis = 0;  // per-share stock lot cost; unused for options
-  double total = 0;
+  double cost_basis = 0;  // dollar cost of the position (qty * open price)
+  double total = 0;       // market value
+  double pnl = 0;         // market value - cost basis
   bool has_contracts = false;
   bool has_strike = false;
   bool has_exp = false;
   bool has_price = false;
   bool has_cost_basis = false;
+  bool has_pnl = false;
 };
 
 struct VerboseActionLeg {
@@ -261,6 +263,7 @@ struct VerboseDay {
   double peak = 0;
   double max_dd = 0;
   Date max_dd_date = 0;
+  double max_dd_nlv = 0;  // NLV on max_dd_date
   double st_loss_carry = 0;
   double lt_loss_carry = 0;
   double st_gain = 0;
@@ -269,6 +272,8 @@ struct VerboseDay {
   double bh_peak = 0;
   double bh_max_dd = 0;
   Date bh_max_dd_date = 0;
+  double bh_max_dd_nlv = 0;  // B&H NLV on bh_max_dd_date
+  double bh_commission = 0;  // entry commission of the pure B&H book
   // Why this day appears in the HTML log: "Trades", "MaxDD", or "Trades & MaxDD".
   std::string print_reason;
   std::vector<VerbosePosRow> positions;

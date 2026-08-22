@@ -73,7 +73,7 @@ static void usage(const char* argv0) {
     "  --verbose                Record every option/stock fill to CSV\n"
     "  --verbose-out <path>     Verbose CSV path (implies --verbose;\n"
     "                           default transactions.csv)\n"
-    "  --verbose-log <path>     Write a collapsible HTML trade log (implies\n"
+    "  --html-log <path>        Write a collapsible HTML trade log (implies\n"
     "                           recording fills; year/day fold)\n"
     "  --bench N                Repeat backtest N times for timing\n"
     "  -h, --help\n";
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
   int bench = 1;
   bool verbose = false;
   std::string verbose_out = "transactions.csv";
-  std::string verbose_log;
+  std::string html_log;
 
   for (int i = 1; i < argc; ++i) {
     auto eq = [&](const char* s) { return std::strcmp(argv[i], s) == 0; };
@@ -201,7 +201,7 @@ int main(int argc, char** argv) {
       verbose_out = need();
       verbose = true;
     }
-    else if (eq("--verbose-log")) verbose_log = need();
+    else if (eq("--html-log")) html_log = need();
     else if (eq("--bench")) bench = std::atoi(need());
     else if (eq("-h") || eq("--help")) { usage(argv[0]); return 0; }
     else {
@@ -265,7 +265,7 @@ int main(int argc, char** argv) {
   }
 
   // Verbose trade log is only needed on the last (or sole) run.
-  const bool record = verbose || !verbose_log.empty();
+  const bool record = verbose || !html_log.empty();
   BacktestResult last;
   auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < bench; ++i) {
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
     write_trades_csv(verbose_out, last.trades, hr, param.call_put_ratio_pct);
     std::cerr << "Wrote " << last.trades.size() << " trades to " << verbose_out << "\n";
   }
-  if (!verbose_log.empty()) {
+  if (!html_log.empty()) {
     VerboseRunInfo run;
     run.argv0 = argv[0];
     run.search = false;
@@ -289,16 +289,16 @@ int main(int argc, char** argv) {
     run.cache = cache_path;
     run.iv_smile = iv_smile_path;
     run.merge_split = merge_split_path;
-    run.verbose_log = verbose_log;
+    run.html_log = html_log;
     run.start = start;
     run.end = end;
     run.every_n = every_n;
     run.atm_band = atm_band;
-    if (write_verbose_html(verbose_log, param.fixed.symbol, param, last, run))
-      std::cerr << "Wrote HTML verbose log (" << last.verbose_log.size()
-                << " days) to " << verbose_log << "\n";
+    if (write_verbose_html(html_log, param.fixed.symbol, param, last, run))
+      std::cerr << "Wrote HTML log (" << last.verbose_log.size()
+                << " days) to " << html_log << "\n";
     else
-      std::cerr << "Failed to write HTML verbose log: " << verbose_log << "\n";
+      std::cerr << "Failed to write HTML log: " << html_log << "\n";
   }
 
   if (param.long_pos_mil > 0) {

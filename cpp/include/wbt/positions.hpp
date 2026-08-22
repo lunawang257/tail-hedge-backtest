@@ -76,6 +76,7 @@ struct PositionsAndStats {
   std::string max_drawdown_peak_date;
   Date peak_date = 0;
   Date max_dd_date = 0;
+  double max_dd_nlv = 0;  // NLV on max_dd_date
 
   const OptionsDataset* all_data = nullptr;
 

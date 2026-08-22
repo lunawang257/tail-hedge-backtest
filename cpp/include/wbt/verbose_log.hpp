@@ -16,12 +16,16 @@ struct VerboseRunInfo {
   std::string cache;
   std::string iv_smile;
   std::string merge_split;
-  std::string verbose_log;
+  std::string html_log;
   Date start = 0;
   Date end = 0;
   int every_n = 1;
   double atm_band = 0;
 };
+
+// Copy-paste CLI that re-runs this config. compact=true → one line (CSV).
+std::string reproduce_command(const std::string& symbol, const WParam& param,
+                              const VerboseRunInfo& run, bool compact = false);
 
 // Write a collapsible HTML trade log from result.verbose_log.
 // Returns false if the file could not be opened.

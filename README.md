@@ -33,9 +33,10 @@ history exists).
 # Build
 
 ```bash
-cd cpp
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+./build.sh
+# optional:
+./build.sh -debug    # Debug instead of Release
+./build.sh -j 8      # cap parallel jobs
 ```
 
 This produces three binaries in `cpp/build/`:
@@ -72,7 +73,26 @@ Key arguments (see `w_backtest --help`):
 | `--trade-every-n-days` | Thin sessions for faster sweeps |
 | `--gamma-scalp` / `--no-gamma-scalp` | Toggle dynamic hedging (default off) |
 | `--no-expected-pnl` | Skip expected P/L marks |
+| `--html-log PATH` | Write a collapsible HTML trade log |
 | `--bench N` | Repeat the run N times for timing |
+
+## HTML trade log
+
+`--html-log` writes a foldable HTML diary (year → day, with a copy-paste
+reproduce command at the top). For a single backtest:
+
+```bash
+cpp/build/w_backtest \
+  -i data/SPY_fixture_small.csv \
+  -y data/yield-curve-rates-1990-2024.csv \
+  --short-dte 30 --long-dte 60 \
+  --html-log spy.html
+```
+
+After `./run_cpp_search.sh`, each results CSV row has a `command` column that
+already includes `--html-log <symbol>-<id>.html` (e.g. `QQQ-0.html` for the
+top-ranked QQQ config). Paste that command from the repo root to regenerate
+the HTML log for that row.
 
 ## Parameter search (`w_search`)
 
@@ -91,6 +111,7 @@ caching, and parity test instructions.
 
 ```
 cpp/                  C++ engine, CLI, search, and parity tests (see cpp/README.md)
+build.sh              Release/Debug build of w_backtest, w_search, w_tests
 run_cpp_search.sh     Build + multi-symbol parameter search driver
 data/                 Bundled SPY fixtures + yield curve
 search-*-cpp.csv      Saved search results
@@ -99,5 +120,6 @@ search-*-cpp.csv      Saved search results
 # Outputs
 
 - `w_backtest` prints summary metrics (annualized return, max drawdown, final
-  NLV, roll & hedge counts) to stdout.
-- `w_search` writes one CSV row per parameter set, ranked by score.
+  NLV, roll & hedge counts) to stdout. `--html-log` writes an HTML trade diary.
+- `w_search` writes one CSV row per parameter set, ranked by score. Each row's
+  `command` includes `--html-log <symbol>-<id>.html` to rebuild that run's HTML log.
