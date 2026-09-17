@@ -127,12 +127,18 @@ struct FixedParam {
 
 enum class WingMode { Fixed, Credit, Theta };
 
+// Theta: shorts in one unit. Longs are n+1, n+2, … up to n * max_wing_mult.
+// Overlay units = target_net_puts / (longs − n). Example: 7 long / 5 short →
+// 2 net longs per unit.
+inline constexpr int kThetaShortPerUnit = 5;
+
 struct WParam {
   FixedParam fixed;
   int short_dte = 30;
   int long_dte = 60;
   double short_delta = 0.40;
   double long_delta = 0.10;
+  // Fixed/Credit: shorts per unit. Theta ignores this and uses kThetaShortPerUnit.
   int n_call = 1, n_put = 1;
   // Fixed wing mode: long/short contract ratio (e.g. 1.3 → 13 longs per 10 shorts).
   // Credit/theta: unused as an input (wing size chosen at runtime).
@@ -227,12 +233,14 @@ struct VerbosePosRow {
   double cost_basis = 0;  // dollar cost of the position (qty * open price)
   double total = 0;       // market value
   double pnl = 0;         // market value - cost basis
+  double theta = 0;       // daily dollar theta (options only)
   bool has_contracts = false;
   bool has_strike = false;
   bool has_exp = false;
   bool has_price = false;
   bool has_cost_basis = false;
   bool has_pnl = false;
+  bool has_theta = false;
 };
 
 struct VerboseActionLeg {
@@ -268,6 +276,10 @@ struct VerboseDay {
   double lt_loss_carry = 0;
   double st_gain = 0;
   double lt_gain = 0;
+  double call_pnl = 0;  // cumulative realized P/L from call legs
+  double put_pnl = 0;   // cumulative realized P/L from put legs
+  double short_pnl = 0;  // cumulative realized P/L from short option legs
+  double long_pnl = 0;   // cumulative realized P/L from long option legs
   double bh_nlv = 0;
   double bh_peak = 0;
   double bh_max_dd = 0;
@@ -288,6 +300,11 @@ struct BacktestResult {
   int num_rolls = 0;
   int num_gamma_hedges = 0;
   double expected_pnl = 0;
+  double call_pnl = 0;  // total realized P/L from call legs
+  double put_pnl = 0;   // total realized P/L from put legs
+  double short_pnl = 0;  // total realized P/L from short option legs
+  double long_pnl = 0;   // total realized P/L from long option legs
+  double w_win_pct = 0;  // % of W structure closes with positive total P/L
   // Buy-and-hold-only baseline (populated when long_pos_mil > 0).
   double baseline_annual_return = 0;
   double baseline_max_drawdown = 0;

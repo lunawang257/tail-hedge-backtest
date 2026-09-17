@@ -3,6 +3,8 @@
 #include "wbt/data.hpp"
 #include "wbt/strategy.hpp"
 #include "wbt/chain.hpp"
+#include "wbt/positions.hpp"
+#include "wbt/verbose_log.hpp"
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -49,6 +51,13 @@ static void check(const char* name, double got, double exp, double tol) {
   if (!ok) ++g_fail;
 }
 
+static void check_contains(const char* name, const std::string& text,
+                           const std::string& needle) {
+  bool ok = text.find(needle) != std::string::npos;
+  std::cout << (ok ? "PASS" : "FAIL") << " " << name << "\n";
+  if (!ok) ++g_fail;
+}
+
 int main(int argc, char** argv) {
   if (argc < 4) {
     std::cerr << "Usage: w_tests <yield.csv> <fixture.csv> <python_reference.json>\n";
@@ -60,6 +69,45 @@ int main(int argc, char** argv) {
 
   load_yield_data(yield_path);
   auto ref = read_file(ref_path);
+
+  // Realized option P/L is classified independently by option type and
+  // long/short leg, and all four cumulative values appear in the HTML stats.
+  {
+    PositionsAndStats stat;
+    const Date opened = parse_date("2020-01-02");
+    const Date closed = parse_date("2020-01-03");
+    stat.add_realized_gain(120, opened, closed, false, false, false);
+    stat.add_realized_gain(-30, opened, closed, false, true, false);
+    stat.add_realized_gain(45, opened, closed, false, false, true);
+    stat.add_realized_gain(-15, opened, closed, false, true, true);
+    check("pl_call", stat.total_call_capital_gain, 165, 0);
+    check("pl_put", stat.total_put_capital_gain, -45, 0);
+    check("pl_short", stat.total_short_option_capital_gain, 90, 0);
+    check("pl_long", stat.total_long_option_capital_gain, 30, 0);
+
+    BacktestResult html_result;
+    VerboseDay day;
+    day.date = closed;
+    day.call_pnl = stat.total_call_capital_gain;
+    day.put_pnl = stat.total_put_capital_gain;
+    day.short_pnl = stat.total_short_option_capital_gain;
+    day.long_pnl = stat.total_long_option_capital_gain;
+    html_result.verbose_log.push_back(day);
+    const char* html_path = "/tmp/wbt-leg-pnl-test.html";
+    check("html_written", write_verbose_html(html_path, "TEST", WParam{},
+                                              html_result),
+          1, 0);
+    const auto html = read_file(html_path);
+    check_contains("html_leg_pnl_headers", html,
+                   "PLcall</th><th class=\"num\">PLput</th>"
+                   "<th class=\"num\">PLshort</th>"
+                   "<th class=\"num\">PLlong</th>");
+    check_contains("html_leg_pnl_values", html,
+                   "$165</td><td class=\"num\">-$45</td>"
+                   "<td class=\"num\">$90</td>"
+                   "<td class=\"num\">$30</td>");
+    std::remove(html_path);
+  }
 
   // --- GBS parity ---
   {

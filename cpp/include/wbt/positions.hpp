@@ -54,6 +54,8 @@ struct PositionsAndStats {
   double total_capital_gain = 0;
   double total_put_capital_gain = 0;
   double total_call_capital_gain = 0;
+  double total_short_option_capital_gain = 0;
+  double total_long_option_capital_gain = 0;
   double total_stock_capital_gain = 0;
   double total_commission = 0;
   int num_data_missing = 0;
@@ -64,6 +66,8 @@ struct PositionsAndStats {
   double structure_open_spot = 0;
   int num_rolls = 0;
   int num_gamma_hedges = 0;
+  int num_w_closes = 0;  // W structure closes
+  int num_w_wins = 0;    // W structure closes with positive total P/L
   double last_expected_pnl = 0;
   int last_wing_m_call = 0, last_wing_m_put = 0;
   int last_units_used = 0;
@@ -91,7 +95,8 @@ struct PositionsAndStats {
   void open_stock(double shares, double px, Date d, bool buy_and_hold = false);
   double buy_and_hold_shares() const;
   void add_realized_gain(double gain, Date open_date, Date close_date,
-                         bool is_stock, bool is_put = false);
+                         bool is_stock, bool is_put = false,
+                         bool is_long_option = false);
   void fill_trade_snapshot(TradeRecord& tr, Date date, double spot) const;
   void log_stock_trade(std::vector<TradeRecord>* log, Date date, double spot,
                        const char* action, const char* reason,

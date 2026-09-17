@@ -79,8 +79,13 @@ WParam to_param(const SearchConfig& c, const std::string& symbol,
   p.long_dte = c.long_dte;
   p.short_delta = c.short_delta;
   p.long_delta = c.long_delta;
-  p.n_call = 1;
-  p.n_put = 1;
+  if (c.wing_mode == WingMode::Theta) {
+    p.n_call = kThetaShortPerUnit;
+    p.n_put = kThetaShortPerUnit;
+  } else {
+    p.n_call = 1;
+    p.n_put = 1;
+  }
   p.m_call = c.m_call;
   p.m_put = c.m_put;
   p.units = c.units;
@@ -131,15 +136,15 @@ struct WingSpec {
 struct GridSpec {
   std::vector<int> short_dtes = {7, 14, 30, 45};
   std::vector<int> long_dtes = {30, 60, 90};
-  std::vector<double> short_deltas = {0.35, 0.45};
-  std::vector<double> long_deltas = {0.08, 0.12};
+  std::vector<double> short_deltas = {0.3, 0.4, 0.5};
+  std::vector<double> long_deltas = {0.08, 0.12, 0.15, 0.20};
   // fixed(ratio>1), credit, theta — long wings must outnumber short body.
   std::vector<WingSpec> wings = {
     //{WingMode::Fixed, 1.6, 0.02, 0.0, 4},
     //{WingMode::Fixed, 2.0, 0.02, 0.0, 4},
     //{WingMode::Fixed, 2.4, 0.02, 0.0, 4},
-    {WingMode::Credit, 2.0, 0.02, 0.0, 4},
-    {WingMode::Theta, 2.0, 0.02, 0.0, 4},
+    //{WingMode::Credit, 2.0, 0.02, 0.0, 4},
+    {WingMode::Theta, 4.0, 0.02, 0.0, 4},
   };
   // -1 in profit_takes / loss_cuts means that exit path is disabled
   std::vector<int> roll_dtes = {0, 7, 14, 21};
@@ -235,10 +240,14 @@ std::vector<SearchConfig> build_grid(const GridSpec& g, int units,
           if (!(0 < ldel && ldel < sdel && sdel < 1)) continue;
           for (auto& w : g.wings) {
             // Hard rule: long > short. Fixed ratio must be > 1.
-            // Credit: ratio in (1, max_wing_mult]; theta still sizes from n+1.
+            // Credit: ratio in (1, max_wing_mult]; theta sizes longs from n+1
+            // (n = kThetaShortPerUnit) up to n * max_wing_mult.
             if (w.mode == WingMode::Fixed && w.long_short_ratio <= 1.0) continue;
             if (w.mode == WingMode::Credit && w.max_wing_mult <= 1) continue;
             if (w.mode == WingMode::Theta && w.max_wing_mult < 2) continue;
+            // Theta: same-expiry shorts and longs net to a plain vertical with
+            // no calendar theta edge — skip that degenerate combo.
+            if (w.mode == WingMode::Theta && ld == sd) continue;
             for (double hr : hedge_ratios) {
               for (double cp : g.call_put_ratio_pcts) {
                 if (!(cp > 0)) continue;
@@ -402,7 +411,7 @@ void write_csv(const std::string& path, std::vector<SearchResult>& rows,
          "rollOnExpiry,enableDteRoll,enableProfitTake,profitTakePct,enableLossCut,"
          "lossCutPct,units,callPutRatioPct,longPosMil,score,finalNLV,totalTax,taxPct,"
          "baselineAnnualReturn,baselineMaxDrawdown,baselineFinalNLV,"
-         "longPosShares,unitsUsed,numRolls,elapsedSec,command\n";
+         "longPosShares,unitsUsed,numRolls,W-win,elapsedSec,command\n";
   for (size_t i = 0; i < rows.size(); ++i) {
     auto& r = rows[i];
     auto param = to_param(r.cfg, symbol, opt_comm, opt_slip, long_pos_mil,
@@ -436,6 +445,7 @@ void write_csv(const std::string& path, std::vector<SearchResult>& rows,
         << fmt_trim(r.bt.baseline_final_nlv) << ','
         << fmt_trim(r.bt.long_pos_shares) << ','
         << r.bt.units_used << ',' << r.bt.num_rolls << ','
+        << fmt_trim(r.bt.w_win_pct) << ','
         << fmt_trim(r.elapsed_sec, 2) << ','
         << csv_quote(reproduce_command(symbol, param, row_run, true)) << '\n';
   }
@@ -749,6 +759,8 @@ int main(int argc, char** argv) {
     std::cerr << "  id=" << i << " score=" << r.score << " ret=" << r.bt.annual_return
               << "% dd=" << r.bt.max_drawdown << "% tax="
               << tax_pct_of_nlv(r.bt.total_tax, r.bt.final_nlv) << "%NLV"
+              << " PLc=" << r.bt.call_pnl << " PLp=" << r.bt.put_pnl
+              << " W-win=" << r.bt.w_win_pct << "%"
               << " | sDTE=" << r.cfg.short_dte
               << " lDTE=" << r.cfg.long_dte << " sΔ=" << r.cfg.short_delta
               << " lΔ=" << r.cfg.long_delta << " wing=" << wing_name(r.cfg.wing_mode)

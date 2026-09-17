@@ -137,6 +137,7 @@ std::string day_header_text(const VerboseDay& d) {
      << " Spot: " << fmt_px(d.spot)
      << " | Reason: " << (d.print_reason.empty() ? "—" : d.print_reason)
      << " | NLV: " << fmt_usd(d.nlv)
+     << " | B&H NLV: " << fmt_usd(d.bh_nlv)
      << " | MaxDD: " << fmt_pct(d.max_dd)
      << " | B&H maxDD: " << fmt_pct(d.bh_max_dd);
   return os.str();
@@ -172,7 +173,9 @@ void write_perf_stats_row(std::ostream& out, const char* name, double nlv,
 void write_comm_gain_stats_row(std::ostream& out, const char* name, double nlv,
                                double commission, double st_loss_carry,
                                double lt_loss_carry, double st_gain,
-                               double lt_gain) {
+                               double lt_gain, double call_pnl,
+                               double put_pnl, double short_pnl,
+                               double long_pnl) {
   out << "<tr><td>" << html_escape(name) << "</td>"
       << "<td class=\"num\">" << html_escape(fmt_usd(commission)) << "</td>"
       << "<td class=\"num\">" << html_escape(fmt_comm_pcnt(commission, nlv))
@@ -180,7 +183,11 @@ void write_comm_gain_stats_row(std::ostream& out, const char* name, double nlv,
       << "<td class=\"num\">" << html_escape(fmt_usd(st_loss_carry)) << "</td>"
       << "<td class=\"num\">" << html_escape(fmt_usd(lt_loss_carry)) << "</td>"
       << "<td class=\"num\">" << html_escape(fmt_usd(st_gain)) << "</td>"
-      << "<td class=\"num\">" << html_escape(fmt_usd(lt_gain)) << "</td></tr>\n";
+      << "<td class=\"num\">" << html_escape(fmt_usd(lt_gain)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(call_pnl)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(put_pnl)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(short_pnl)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(long_pnl)) << "</td></tr>\n";
 }
 
 void write_stats_table(std::ostream& out, const VerboseDay& d) {
@@ -214,11 +221,17 @@ void write_stats_table(std::ostream& out, const VerboseDay& d) {
          "<th class=\"num\">LTLoss</th>"
          "<th class=\"num\">STGain</th>"
          "<th class=\"num\">LTGain</th>"
+         "<th class=\"num\">PLcall</th>"
+         "<th class=\"num\">PLput</th>"
+         "<th class=\"num\">PLshort</th>"
+         "<th class=\"num\">PLlong</th>"
          "</tr></thead>\n<tbody>\n";
   write_comm_gain_stats_row(out, "W", d.nlv, d.commission, d.st_loss_carry,
-                            d.lt_loss_carry, d.st_gain, d.lt_gain);
+                            d.lt_loss_carry, d.st_gain, d.lt_gain, d.call_pnl,
+                            d.put_pnl, d.short_pnl, d.long_pnl);
   // Pure B&H never realizes gains, so carry / YTD gain stay at $0.
-  write_comm_gain_stats_row(out, "B&H", d.bh_nlv, d.bh_commission, 0, 0, 0, 0);
+  write_comm_gain_stats_row(out, "B&H", d.bh_nlv, d.bh_commission, 0, 0, 0, 0,
+                            0, 0, 0, 0);
   out << "</tbody></table>\n";
 }
 
@@ -233,6 +246,7 @@ void write_column_legend(std::ostream& out) {
        "W尾部对冲策略（含股票叠加）"},
       {"B&H", "Buy-and-hold of the underlying", "标的买入持有"},
       {"NLV", "Net liquidation value", "净清算价值"},
+      {"B&H NLV", "Buy-and-hold net liquidation value", "买入持有净清算价值"},
       {"Comm", "Cumulative commission", "累计佣金"},
       {"Comm%", "Commission as a percent of NLV", "佣金占净清算价值的百分比"},
       {"Peak", "Peak net liquidation value", "净清算价值峰值"},
@@ -253,6 +267,15 @@ void write_column_legend(std::ostream& out) {
       {"STGain", "Year-to-date short-term capital gain",
        "年初至今短期资本利得"},
       {"LTGain", "Year-to-date long-term capital gain", "年初至今长期资本利得"},
+      {"PLcall", "Cumulative realized P/L from call legs",
+       "看涨期权累计已实现损益"},
+      {"PLput", "Cumulative realized P/L from put legs",
+       "看跌期权累计已实现损益"},
+      {"PLshort", "Cumulative realized P/L from short near-term option legs",
+       "近期空头期权腿累计已实现损益"},
+      {"PLlong", "Cumulative realized P/L from long longer-term option legs",
+       "远期多头期权腿累计已实现损益"},
+      {"D2Exp", "Days to expiration", "距到期天数"},
   };
   out << "<details class=\"colkey\">\n"
          "<summary>"
@@ -290,13 +313,15 @@ std::string action_title(const VerboseAction& a) {
   return os.str();
 }
 
-void write_pos_table(std::ostream& out, const std::vector<VerbosePosRow>& rows) {
+void write_pos_table(std::ostream& out, Date date,
+                     const std::vector<VerbosePosRow>& rows) {
   out << "<table class=\"book\">\n"
          "<thead><tr>"
          "<th>Type</th><th class=\"num\">Contracts</th><th class=\"num\">Strike</th>"
-         "<th>Expiration</th><th class=\"num\">Price</th>"
+         "<th>Expiration</th><th class=\"num\">D2Exp</th><th class=\"num\">Price</th>"
          "<th class=\"num\">Cost-Basis</th><th class=\"num\">Market Value</th>"
          "<th class=\"num\">P&amp;L</th>"
+         "<th class=\"num\">Theta</th>"
          "</tr></thead>\n<tbody>\n";
   for (const auto& r : rows) {
     bool options_nlv = (r.type == "Options NLV");
@@ -319,22 +344,29 @@ void write_pos_table(std::ostream& out, const std::vector<VerbosePosRow>& rows) 
     if (r.has_exp) out << format_date(r.exp_date);
     else if (stock_like) out << "N/A";
     out << "</td><td class=\"num\">";
+    if (r.has_exp) out << days_between(date, r.exp_date);
+    else if (stock_like) out << "N/A";
+    out << "</td><td class=\"num\">";
     if (r.has_price) out << html_escape(fmt_opt_px(r.price));
     out << "</td><td class=\"num\">";
     if (r.has_cost_basis) out << html_escape(fmt_usd(r.cost_basis));
     out << "</td><td class=\"num\">" << html_escape(fmt_usd(r.total))
         << "</td><td class=\"num\">";
     if (r.has_pnl) out << html_escape(fmt_usd(r.pnl));
+    out << "</td><td class=\"num\">";
+    if (r.has_theta) out << html_escape(fmt_usd(r.theta, 2));
     out << "</td></tr>\n";
   }
   out << "</tbody></table>\n";
 }
 
-void write_open_table(std::ostream& out, const std::vector<VerboseActionLeg>& legs) {
+void write_open_table(std::ostream& out, Date date,
+                      const std::vector<VerboseActionLeg>& legs) {
   out << "<table class=\"book\">\n"
          "<thead><tr>"
          "<th>Type</th><th class=\"num\">Contracts</th><th class=\"num\">Strike</th>"
-         "<th>Expiration</th><th class=\"num\">Price</th><th class=\"num\">Total</th>"
+         "<th>Expiration</th><th class=\"num\">D2Exp</th>"
+         "<th class=\"num\">Price</th><th class=\"num\">Total</th>"
          "</tr></thead>\n<tbody>\n";
   double net = 0;
   for (const auto& L : legs) {
@@ -343,33 +375,54 @@ void write_open_table(std::ostream& out, const std::vector<VerboseActionLeg>& le
         << "<td class=\"num\">" << html_escape(fmt_qty(L.contracts)) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_strike(L.strike)) << "</td>"
         << "<td>" << format_date(L.exp_date) << "</td>"
+        << "<td class=\"num\">" << days_between(date, L.exp_date) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_opt_px(L.price)) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_usd(L.total)) << "</td></tr>\n";
   }
   out << "<tr class=\"sum\"><td>Total</td><td class=\"num\"></td>"
          "<td class=\"num\"></td><td></td><td class=\"num\"></td>"
+         "<td class=\"num\"></td>"
       << "<td class=\"num\">" << html_escape(fmt_usd(net)) << "</td></tr>\n";
   out << "</tbody></table>\n";
 }
 
-void write_close_table(std::ostream& out, const std::vector<VerboseActionLeg>& legs) {
+void write_close_table(std::ostream& out, Date date,
+                       const std::vector<VerboseActionLeg>& legs) {
   out << "<table class=\"book\">\n"
          "<thead><tr>"
          "<th>Type</th><th class=\"num\">Contracts</th><th class=\"num\">Strike</th>"
-         "<th>Expiration</th><th class=\"num\">Cost-Basis</th>"
+         "<th>Expiration</th><th class=\"num\">D2Exp</th>"
+         "<th class=\"num\">Cost-Basis</th>"
          "<th class=\"num\">Price</th><th class=\"num\">P/L / share</th>"
          "<th class=\"num\">Total P/L</th>"
+         "<th class=\"num\">P/L Call</th><th class=\"num\">P/L Put</th>"
          "</tr></thead>\n<tbody>\n";
+  double total = 0, total_call = 0, total_put = 0;
   for (const auto& L : legs) {
+    bool is_call = (L.type == "Call");
+    total += L.total;
+    (is_call ? total_call : total_put) += L.total;
     out << "<tr><td>" << html_escape(L.type) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_qty(L.contracts)) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_strike(L.strike)) << "</td>"
         << "<td>" << format_date(L.exp_date) << "</td>"
+        << "<td class=\"num\">" << days_between(date, L.exp_date) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_opt_px(L.cost_basis)) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_opt_px(L.price)) << "</td>"
         << "<td class=\"num\">" << html_escape(fmt_opt_px(L.pnl_per)) << "</td>"
-        << "<td class=\"num\">" << html_escape(fmt_usd(L.total)) << "</td></tr>\n";
+        << "<td class=\"num\">" << html_escape(fmt_usd(L.total)) << "</td>"
+        << "<td class=\"num\">"
+        << (is_call ? html_escape(fmt_usd(L.total)) : "") << "</td>"
+        << "<td class=\"num\">"
+        << (is_call ? "" : html_escape(fmt_usd(L.total))) << "</td></tr>\n";
   }
+  out << "<tr class=\"sum\"><td>Total</td><td class=\"num\"></td>"
+         "<td class=\"num\"></td><td></td><td class=\"num\"></td>"
+         "<td class=\"num\"></td><td class=\"num\"></td><td class=\"num\"></td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(total)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(total_call)) << "</td>"
+      << "<td class=\"num\">" << html_escape(fmt_usd(total_put))
+      << "</td></tr>\n";
   out << "</tbody></table>\n";
 }
 
@@ -412,8 +465,9 @@ summary::-webkit-details-marker, summary::marker { display:none; }
 .pm::before { content: "[+]"; }
 details[open] > summary > .pm::before { content: "[−]"; }
 .lbl { font-weight: 650; }
-.day summary .lbl { font-weight: 500; font-size: 0.92rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                    white-space: pre-wrap; }
+.year summary .end, .day summary .lbl { font-weight: 500; font-size: 0.92rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+.year summary .end { flex: 1; min-width: 0; }
 .body { padding: 4px 8px 12px 28px; overflow-x: auto; }
 h3 { font-size: 0.95rem; margin: 14px 0 6px; }
 table.book { border-collapse: collapse; width: auto; min-width: 640px; font-size: 0.88rem;
@@ -680,12 +734,21 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
     }
   };
 
-  for (const auto& day : result.verbose_log) {
+  const auto& days = result.verbose_log;
+  for (size_t i = 0; i < days.size(); ++i) {
+    const auto& day = days[i];
     int y = year_of(day.date);
     if (y != open_year) {
       close_year();
+      size_t last_i = i;
+      while (last_i + 1 < days.size() &&
+             year_of(days[last_i + 1].date) == y)
+        ++last_i;
       out << "<details class=\"year\">\n<summary><span class=\"pm\"></span>"
-          << "<span class=\"lbl\">" << y << "</span></summary>\n";
+          << "<span class=\"lbl\">" << y << "</span>"
+          << "<span class=\"end\">"
+          << html_escape(day_header_text(days[last_i]))
+          << "</span></summary>\n";
       open_year = y;
     }
     out << "<details class=\"day\">\n<summary><span class=\"pm\"></span>"
@@ -695,12 +758,12 @@ bool write_verbose_html(const std::string& path, const std::string& symbol,
     for (const auto& a : day.actions) {
       out << "<div class=\"action\">" << html_escape(action_title(a)) << "</div>\n";
       if (a.kind == VerboseActionKind::OpenW && !a.legs.empty())
-        write_open_table(out, a.legs);
+        write_open_table(out, day.date, a.legs);
       else if (a.kind == VerboseActionKind::CloseW && !a.legs.empty())
-        write_close_table(out, a.legs);
+        write_close_table(out, day.date, a.legs);
     }
     out << "<h3>Position Table</h3>\n";
-    write_pos_table(out, day.positions);
+    write_pos_table(out, day.date, day.positions);
     out << "</div></details>\n";
   }
   close_year();

@@ -174,8 +174,9 @@ bool size_credit_structure(const WParam& param,
 std::pair<int, int> choose_wing_counts(const WParam& param,
                                        const SyntheticQuote& sc, const SyntheticQuote& sp,
                                        const SyntheticQuote& lc, const SyntheticQuote& lp) {
-  int n_c = param.n_call, n_p = param.n_put;
-  // Theta: integer wing multiple from n+1 up to max_wing_mult.
+  const int n_c = kThetaShortPerUnit;
+  const int n_p = kThetaShortPerUnit;
+  // Theta: integer longs from n+1 up to n * max_wing_mult (n = 5 → 6, 7, …).
   // Credit sizing is in size_credit_structure (fractional ratio, all-in credit).
   int min_m = std::max(n_c, n_p) + 1;
   int max_m = std::max(min_m, std::max(n_c, n_p) * std::max(1, param.max_wing_mult));
@@ -327,8 +328,11 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
       return false;
     stat.last_units_used = u;
   } else {
+    const int n_c = kThetaShortPerUnit;
+    const int n_p = kThetaShortPerUnit;
     auto [mc, mp] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
-    int net_per_unit = mp - param.n_put;
+    // One unit = n shorts + m longs → net longs = m − n (e.g. 7−5 = 2).
+    int net_per_unit = mp - n_p;
     if (net_per_unit < 1) net_per_unit = 1;
     int u = std::max(1, param.units);
     if (hedge_sized) {
@@ -336,8 +340,8 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
           1, static_cast<int>(std::llround(target_net_puts /
                                            static_cast<double>(net_per_unit))));
     }
-    short_c = param.n_call * u;
-    short_p = param.n_put * u;
+    short_c = n_c * u;
+    short_p = n_p * u;
     long_c = mc * u;
     long_p = mp * u;
     stat.last_units_used = u;
@@ -379,7 +383,7 @@ double close_one_option(const WParam& param, Date date, double spot, PositionsAn
   stat.cash += cash_change;
   stat.total_commission += opt_comm * std::abs(opt.num_contracts);
   stat.add_realized_gain(capital_gain, opt.open_date, date, /*is_stock=*/false,
-                         opt.opt_type == OptType::Put);
+                         opt.opt_type == OptType::Put, is_long);
   if (log) {
     TradeRecord tr;
     tr.date = date;
@@ -405,7 +409,12 @@ double close_one_option(const WParam& param, Date date, double spot, PositionsAn
 
 void close_all_options(const WParam& param, Date date, double spot, PositionsAndStats& stat,
                        const char* reason, TradeLog* log) {
-  for (auto& opt : stat.opt_list) close_one_option(param, date, spot, stat, opt, reason, log);
+  if (stat.opt_list.empty()) return;
+  double total_gain = 0;
+  for (auto& opt : stat.opt_list)
+    total_gain += close_one_option(param, date, spot, stat, opt, reason, log);
+  ++stat.num_w_closes;
+  if (total_gain > 0) ++stat.num_w_wins;
   stat.opt_list.clear();
 }
 
@@ -663,17 +672,38 @@ void update_greeks(Date date, double spot, PositionsAndStats& stat) {
   }
 }
 
+// Daily dollar theta of one option lot (same scale as net_greeks).
+double option_daily_theta(const OptPosition& opt, Date date, double spot) {
+  double th = 0;
+  if (opt.exp_date > date) {
+    int days = days_between(date, opt.exp_date);
+    double t = std::max(days / YEAR_FRAC, 1e-6);
+    double iv = opt.implied_vol > 0 ? opt.implied_vol : 0.20;
+    try {
+      double r = get_risk_free_rate(date, t);
+      double q = get_dividend_yield(date);
+      th = merton(opt.opt_type, spot, opt.strike, t, r, q, iv).theta;
+    } catch (...) {
+      th = opt.per_contract_theta;
+    }
+  }
+  return static_cast<double>(opt.num_contracts) * th * CONTRACT_SCALE / YEAR_FRAC;
+}
+
 std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date date,
                                           double spot) {
   std::vector<VerbosePosRow> rows;
   double opt_total = 0;
   double opt_cb = 0;
+  double opt_theta = 0;
   for (const auto& opt : stat.opt_list) {
     double mark = stat.mark_option(opt, date, spot);
     double tot = static_cast<double>(opt.num_contracts) * mark * CONTRACT_SCALE;
     double cb = opt.get_cost_basis();
+    double th = option_daily_theta(opt, date, spot);
     opt_total += tot;
     opt_cb += cb;
+    opt_theta += th;
     VerbosePosRow r;
     r.type = opt.opt_type == OptType::Call ? "Call" : "Put";
     r.contracts = opt.num_contracts;
@@ -689,6 +719,8 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
     r.total = tot;
     r.pnl = tot - cb;
     r.has_pnl = true;
+    r.theta = th;
+    r.has_theta = true;
     rows.push_back(r);
   }
   VerbosePosRow opt_sum;
@@ -698,6 +730,8 @@ std::vector<VerbosePosRow> build_pos_rows(const PositionsAndStats& stat, Date da
   opt_sum.total = opt_total;
   opt_sum.pnl = opt_total - opt_cb;
   opt_sum.has_pnl = true;
+  opt_sum.theta = opt_theta;
+  opt_sum.has_theta = true;
   rows.push_back(opt_sum);
 
   double stock_mtm = 0;
@@ -853,6 +887,10 @@ struct VerboseRecorder {
     cur.lt_loss_carry = stat.lt_loss_carryover;
     cur.st_gain = stat.annual_st_capital_gain;
     cur.lt_gain = stat.annual_lt_capital_gain;
+    cur.call_pnl = stat.total_call_capital_gain;
+    cur.put_pnl = stat.total_put_capital_gain;
+    cur.short_pnl = stat.total_short_option_capital_gain;
+    cur.long_pnl = stat.total_long_option_capital_gain;
     cur.bh_nlv = bh.nlv(spot);
     cur.bh_peak = bh.peak;
     cur.bh_max_dd = bh.max_dd;
@@ -1145,6 +1183,13 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
       result.num_rolls = stat.num_rolls;
       result.num_gamma_hedges = stat.num_gamma_hedges;
       result.expected_pnl = stat.last_expected_pnl;
+      result.call_pnl = stat.total_call_capital_gain;
+      result.put_pnl = stat.total_put_capital_gain;
+      result.short_pnl = stat.total_short_option_capital_gain;
+      result.long_pnl = stat.total_long_option_capital_gain;
+      result.w_win_pct = stat.num_w_closes > 0
+                             ? 100.0 * stat.num_w_wins / stat.num_w_closes
+                             : 0.0;
       result.units_used = stat.last_units_used;
       if (verbose) {
         if (recp) {
@@ -1198,13 +1243,23 @@ BacktestResult w_strategy(const OptionsDataset& ds, const WParam& param, bool ve
   result.num_rolls = stat.num_rolls;
   result.num_gamma_hedges = stat.num_gamma_hedges;
   result.expected_pnl = stat.last_expected_pnl;
+  result.call_pnl = stat.total_call_capital_gain;
+  result.put_pnl = stat.total_put_capital_gain;
+  result.short_pnl = stat.total_short_option_capital_gain;
+  result.long_pnl = stat.total_long_option_capital_gain;
+  result.w_win_pct = stat.num_w_closes > 0
+                         ? 100.0 * stat.num_w_wins / stat.num_w_closes
+                         : 0.0;
   result.units_used = stat.last_units_used;
   if (verbose) {
     std::cerr << "C++ backtest annual=" << annual << "% dd=" << stat.max_drawdown
               << "% finalNLV=" << final_nlv
               << " tax=" << tax_pct_of_nlv(stat.total_tax, final_nlv) << "%NLV"
               << " rolls=" << stat.num_rolls
-              << " trades=" << result.trades.size();
+              << " trades=" << result.trades.size()
+              << " PLc=" << stat.total_call_capital_gain
+              << " PLp=" << stat.total_put_capital_gain
+              << " W-win=" << result.w_win_pct << "%";
     if (long_pos_dollars > 0) {
       std::cerr << " | baseline B&H annual=" << result.baseline_annual_return
                 << "% dd=" << result.baseline_max_drawdown

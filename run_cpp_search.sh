@@ -7,7 +7,7 @@
 #   ./run_cpp_search.sh -no-tax NVDA    # listed symbols, 0 tax
 #   ./run_cpp_search.sh NVDA GOOG -tax
 #
-# Symbols: SPX QQQ AAPL (START→END window), NVDA GOOG AVGO (full history).
+# Symbols: SPX QQQ AAPL NVDA (START→END window).
 # Flags: -tax / --tax (37.1% LT / 54.1% ST), -no-tax / --no-tax (0%; default).
 # Env overrides: OPTIONS_DATA YIELD START END EVERY_N ATM_BAND UNITS
 #   LONG_POS_MIL HEDGE_RATIOS CALL_PUT_RATIO_PCTS LT_TAX_PCT ST_TAX_PCT
@@ -110,9 +110,7 @@ declare -a ALL_JOBS=(
   "SPX|window"
   "QQQ|window"
   "AAPL|window"
-  "NVDA|full"
-  "GOOG|full"
-  "AVGO|full"
+  "NVDA|window"
 )
 
 job_for_symbol() {
@@ -177,7 +175,18 @@ fi
 SELECTED=("${RUNNABLE[@]}")
 
 echo "=== Building C++ (Release) ==="
-cmake -S "$ROOT/cpp" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  # Xcode updates can remove SDK paths cached in compiler detection and Zlib.
+  # A fresh configuration (CMake 3.24+) rediscovers both using the active SDK.
+  if ! MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)" || [[ ! -d "$MACOS_SDK" ]]; then
+    echo "error: cannot locate the macOS SDK; check xcode-select -p and your Xcode/Command Line Tools installation" >&2
+    exit 1
+  fi
+  cmake --fresh -S "$ROOT/cpp" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_OSX_SYSROOT="$MACOS_SDK"
+else
+  cmake -S "$ROOT/cpp" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+fi
 cmake --build "$BUILD_DIR" -j "$WORKERS" --target w_search w_backtest w_tests
 
 W_SEARCH="$BUILD_DIR/w_search"

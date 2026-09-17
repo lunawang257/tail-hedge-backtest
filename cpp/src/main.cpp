@@ -315,6 +315,7 @@ int main(int argc, char** argv) {
             << " totalTax=" << last.total_tax
             << " taxPct=" << tax_pct_of_nlv(last.total_tax, last.final_nlv)
             << " numRolls=" << last.num_rolls
+            << " W-win=" << last.w_win_pct << "%"
             << " elapsed_ms=" << (ms / bench)
             << " (bench=" << bench << ")\n";
   return last.ok ? 0 : 1;

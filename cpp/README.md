@@ -252,7 +252,8 @@ Hard rule: long wing contracts must always exceed short body contracts.
 For fixed mode, `long_short_ratio > 1` (e.g. `fixed:1.3` → 13 longs per 10
 shorts). `fixed:1` is rejected. Credit picks a real ratio in `(1, maxWingMult]`
 that is a net credit after slippage and commission (no 2:1 floor); if none
-exists the structure is not opened. Theta sizes from at least `n+1` upward.
+exists the structure is not opened. Theta uses a 5-short unit and sizes
+longs from `6` upward (`n+1` with `n = 5`).
 
 Shrink or pin any dimension without rebuilding (comma lists; one value = fixed):
 
@@ -281,8 +282,10 @@ Wing modes:
   `1.1`, `2.25`) such that long debit ≤ short credit × `(1 - creditBuffer)`
   **after slippage and commission**. Longs must still exceed shorts. If even
   the minimum (`short+1`) is a debit, skip the open.
-- **theta**: increase wing size from `n+1` while net structure theta ≥
-  `thetaThreshold` (never below `n+1`).
+- **theta**: one unit shorts `kThetaShortPerUnit` (5) body contracts. Increase
+  longs from `n+1` (6, 7, …) up to `n × maxWingMult` while net structure theta
+  ≥ `thetaThreshold` (never below `n+1`). Overlay: units =
+  `target_net_puts / (longs − n)` (e.g. 7 long / 5 short → 2 net per unit).
 
 | Dataset | Days | Python | C++ | Speedup |
 |---------|------|--------|-----|---------|

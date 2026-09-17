@@ -103,11 +103,15 @@ double PositionsAndStats::buy_and_hold_shares() const {
 
 void PositionsAndStats::add_realized_gain(double gain, Date open_date,
                                           Date close_date, bool is_stock,
-                                          bool is_put) {
+                                          bool is_put, bool is_long_option) {
   total_capital_gain += gain;
   if (is_stock) total_stock_capital_gain += gain;
-  else if (is_put) total_put_capital_gain += gain;
-  else total_call_capital_gain += gain;
+  else {
+    if (is_put) total_put_capital_gain += gain;
+    else total_call_capital_gain += gain;
+    if (is_long_option) total_long_option_capital_gain += gain;
+    else total_short_option_capital_gain += gain;
+  }
   if (is_long_term_hold(open_date, close_date))
     annual_lt_capital_gain += gain;
   else
