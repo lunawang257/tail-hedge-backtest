@@ -171,27 +171,24 @@ bool size_credit_structure(const WParam& param,
   return true;
 }
 
-std::pair<int, int> choose_wing_counts(const WParam& param,
-                                       const SyntheticQuote& sc, const SyntheticQuote& sp,
-                                       const SyntheticQuote& lc, const SyntheticQuote& lp) {
-  const int n_c = kThetaShortPerUnit;
-  const int n_p = kThetaShortPerUnit;
-  // Theta: integer longs from n+1 up to n * max_wing_mult (n = 5 → 6, 7, …).
-  // Credit sizing is in size_credit_structure (fractional ratio, all-in credit).
-  int min_m = std::max(n_c, n_p) + 1;
-  int max_m = std::max(min_m, std::max(n_c, n_p) * std::max(1, param.max_wing_mult));
-  int best_c = std::max(n_c, min_m), best_p = std::max(n_p, min_m);
+// Annual dollar theta, normalized to one five-short unit. Test the call
+// and put sides independently; a profitable call side cannot fund put decay.
+bool meets_side_theta(const WParam& param, double short_theta,
+                      double long_theta, int shorts, int longs) {
+  if (shorts <= 0) return longs == 0;
+  double theta_per_unit = (-shorts * short_theta + longs * long_theta) *
+                          CONTRACT_SCALE * kThetaShortPerUnit / shorts;
+  return theta_per_unit >= param.theta_threshold - 1e-9;
+}
 
-  auto net_theta = [&](int mc, int mp) {
-    return ((-n_c) * sc.theta + (-n_p) * sp.theta + mc * lc.theta + mp * lp.theta) * CONTRACT_SCALE;
-  };
-
-  for (int m = min_m; m <= max_m; ++m) {
-    int mc = std::max(n_c, m), mp = std::max(n_p, m);
-    if (net_theta(mc, mp) >= param.theta_threshold - 1e-9) { best_c = mc; best_p = mp; }
-    else break;
+int choose_theta_wing_count(const WParam& param, double short_theta,
+                            double long_theta) {
+  const int n = kThetaShortPerUnit;
+  int best = 0;  // No feasible ratio: do not silently default to n+1.
+  for (int m = n + 1; m <= n * param.max_wing_mult; ++m) {
+    if (meets_side_theta(param, short_theta, long_theta, n, m)) best = m;
   }
-  return {best_c, best_p};
+  return best;
 }
 
 double open_leg(const WParam& param, Date date, double spot, PositionsAndStats& stat,
@@ -328,26 +325,35 @@ bool open_w_structure(const WParam& param, Date date, const OptionsDataset& ds,
       return false;
     stat.last_units_used = u;
   } else {
-    const int n_c = kThetaShortPerUnit;
-    const int n_p = kThetaShortPerUnit;
-    auto [mc, mp] = choose_wing_counts(param, *sc, *sp, *lc, *lp);
-    // One unit = n shorts + m longs → net longs = m − n (e.g. 7−5 = 2).
-    int net_per_unit = mp - n_p;
-    if (net_per_unit < 1) net_per_unit = 1;
+    const int n = kThetaShortPerUnit;
+    const int mp = choose_theta_wing_count(param, sp->theta, lp->theta);
+    const int mc = choose_theta_wing_count(param, sc->theta, lc->theta);
+    if (mp == 0) return false;
+    // Put ratio determines net-put protection and hence the overlay scale.
     int u = std::max(1, param.units);
     if (hedge_sized) {
-      u = std::max(
-          1, static_cast<int>(std::llround(target_net_puts /
-                                           static_cast<double>(net_per_unit))));
+      u = std::max(1, static_cast<int>(std::llround(
+          target_net_puts / static_cast<double>(mp - n))));
     }
-    short_c = n_c * u;
-    short_p = n_p * u;
-    long_c = mc * u;
+    short_p = n * u;
     long_p = mp * u;
-    stat.last_units_used = u;
+    // The call/put percentage sets short-call exposure. Preserve the call
+    // side's independently selected long/short ratio, not the put ratio.
     short_c = scale_calls_from_puts(short_p, param.call_put_ratio_pct);
-    long_c = scale_calls_from_puts(long_p, param.call_put_ratio_pct);
-    if (short_c > 0) long_c = std::max(long_c, short_c + 1);
+    if (short_c > 0) {
+      if (mc == 0) return false;
+      long_c = std::max(short_c + 1, static_cast<int>(std::llround(
+          static_cast<double>(short_c) * mc / n)));
+      // Integer rounding can overshoot the theta budget. Reduce wings until
+      // feasible; reject if even short+1 fails. Do not change the hedge size.
+      while (long_c > short_c &&
+             !meets_side_theta(param, sc->theta, lc->theta, short_c, long_c))
+        --long_c;
+      if (long_c <= short_c) return false;
+    }
+    if (!meets_side_theta(param, sp->theta, lp->theta, short_p, long_p))
+      return false;
+    stat.last_units_used = u;
   }
 
   ++stat.structure_id;

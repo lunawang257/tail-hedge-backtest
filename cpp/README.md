@@ -51,7 +51,7 @@ The strategy sells a short-dated call+put body and buys longer-dated wings
 | `--units N` | Multiplier applied to all four legs (scales size). Default `1`. Ignored when `--long-pos-mil > 0`. |
 | `--m-call X` | In fixed wing mode: long/short **ratio** for calls (e.g. `1.3` → 13 longs per 10 shorts). Default `2`. |
 | `--m-put X` | In fixed wing mode: long/short **ratio** for puts. Default `2`. |
-| `--call-put-ratio-pct X` | Call contracts as a **percent of puts** (default `100` = equal). `--call-put-ratio-pct 20` with puts −100/+200 → calls −20/+40. |
+| `--call-put-ratio-pct X` | Call contracts as a **percent of puts** (default `100` = equal). `--call-put-ratio-pct 20` with puts −100/+200 → calls −20/+40. Theta mode applies the percentage to shorts and uses its independently selected call wing ratio. |
 | `--long-pos-mil X` | Starting capital in $millions (default `0` = options-only, `$1e6` cash). Buys `X*1e6` notional on day 1; NLV/MaxDD include W + stock. Alias: `--long-pos`. Opening W credit is held as cash (not swept into overlay). Excess cash above that credit buys overlay shares; a shortfall sells highest cost-basis lots. Year-end tax is paid from cash / by selling stock; unused capital losses carry forward. |
 | `--hedge-ratio X` | With long-pos: size W so net long puts ≈ `X × (shares/100)`. |
 | `--commission X` | Option commission in $/contract **today**. Default `1.7125`. Dates before later splits are scaled via `--merge-split`. |
@@ -216,7 +216,7 @@ Or call `w_search` directly:
 | `--hedge-ratio X` | Single hedge ratio (only with long-pos). Net long puts (`long − short` put contracts) protect `X × (shares/100)` of the long. |
 | `--hedge-ratios a,b,..` | Grid of hedge ratios when long-pos is on (default `0.5,1,1.5,2`). |
 | `--call-put-ratio-pct X` | Single value: call contracts as % of puts (`100` = equal). |
-| `--call-put-ratio-pcts a,b,..` | Grid of call/put percents (default `100,50,25`). `20` → calls are 20% of puts. |
+| `--call-put-ratio-pcts a,b,..` | Grid of call/put percents (default `100,50,25`). `20` → calls are 20% of puts. Theta mode applies this to shorts; long calls use their own selected ratio. |
 | `--commission X` | Option commission in $/contract **today** (default `1.7125`). Dates before later splits are scaled via `--merge-split`. |
 | `--slippage-pct X` | Option slippage % of mid; `5` = 5% (default `5`). |
 | `--lt-tax-pct X` | Long-term capital-gain tax % (default `37.1`). |
@@ -282,10 +282,20 @@ Wing modes:
   `1.1`, `2.25`) such that long debit ≤ short credit × `(1 - creditBuffer)`
   **after slippage and commission**. Longs must still exceed shorts. If even
   the minimum (`short+1`) is a debit, skip the open.
-- **theta**: one unit shorts `kThetaShortPerUnit` (5) body contracts. Increase
-  longs from `n+1` (6, 7, …) up to `n × maxWingMult` while net structure theta
-  ≥ `thetaThreshold` (never below `n+1`). Overlay: units =
-  `target_net_puts / (longs − n)` (e.g. 7 long / 5 short → 2 net per unit).
+- **theta**: find call and put ratios independently. For each side, fix
+  `n = kThetaShortPerUnit` (5) shorts and test integer long counts `m = 6..25`
+  (upper bound `n × maxWingMult`). Choose the largest `m` satisfying
+  `100 × (-5 × shortTheta + m × longTheta) ≥ thetaThreshold` on that side.
+  The threshold is annual dollar theta per five-short unit (default zero).
+  Skip entry if a required side has no feasible ratio. Overlay units are
+  `max(1, round(target_net_puts / (m_put − 5)))`; puts become `5u` shorts and
+  `m_put × u` longs. Short calls are `round(short_puts × callPutRatioPct / 100)`;
+  long calls use the independently selected call ratio `m_call / 5`, not the
+  put ratio. Round long calls to whole contracts and reduce them if necessary
+  to preserve the call theta threshold, normalized to a five-short unit.
+  Each active side must still have more longs than shorts; otherwise skip entry.
+  Zero short calls omit the call side. These are entry constraints, not a
+  guarantee of nonnegative theta throughout the holding period.
 
 | Dataset | Days | Python | C++ | Speedup |
 |---------|------|--------|-----|---------|

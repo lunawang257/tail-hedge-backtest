@@ -146,10 +146,12 @@ struct WParam {
   int units = 1;
   // Call contracts as a percent of the put side (100 = equal). After puts are
   // sized, short/long calls = round(put contracts × pct / 100).
+  // Theta: only short calls use this percentage; long calls use their own ratio.
   // E.g. 20 with puts −100/+200 → calls −20/+40.
   double call_put_ratio_pct = 100.0;
   WingMode wing_mode = WingMode::Fixed;
   double credit_buffer = 0.02;
+  // Minimum annual dollar theta per five-short unit, independently per side.
   double theta_threshold = 0.0;
   // Credit: max long/short contract ratio (e.g. 4 → up to 4:1). The chosen
   // ratio can be any real value in (1, max_wing_mult] that is a credit after

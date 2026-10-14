@@ -217,6 +217,61 @@ int main(int argc, char** argv) {
     check("short_call_delta", std::abs(sc->delta), std::abs(json_num_after(block, "delta")), 0.08);
   }
 
+  // Theta must be feasible on EACH side after hedge sizing and rounding.
+  // Exercise both overlay and explicit units, including a disabled call side.
+  for (double overlay : {0.0, 1.0}) {
+    for (double pct : {0.0, 25.0, 100.0}) {
+      WParam theta = param;
+      theta.wing_mode = WingMode::Theta;
+      theta.long_pos_mil = overlay;
+      theta.units = 9;
+      theta.call_put_ratio_pct = pct;
+      theta.long_delta = 0.08;
+      auto result = w_strategy(ds, theta, true);
+      int opens = 0;
+      for (const auto& day : result.verbose_log) {
+        bool opened = false;
+        for (const auto& action : day.actions)
+          opened |= action.kind == VerboseActionKind::OpenW;
+        if (!opened) continue;
+        ++opens;
+        double ct = 0, pt = 0;
+        int cs = 0, cl = 0, ps = 0, pl = 0;
+        for (const auto& row : day.positions) {
+          if (row.type == "Call") {
+            ct += row.theta;
+            if (row.contracts < 0) cs -= row.contracts;
+            else cl += row.contracts;
+          } else if (row.type == "Put") {
+            pt += row.theta;
+            if (row.contracts < 0) ps -= row.contracts;
+            else pl += row.contracts;
+          }
+        }
+        check("theta_entry_call_nonnegative", ct >= -1e-7, 1, 0);
+        check("theta_entry_put_nonnegative", pt >= -1e-7, 1, 0);
+        check("theta_put_longs_exceed_shorts", pl > ps && ps > 0, 1, 0);
+        check("theta_call_short_exposure", cs, scale_calls_from_puts(ps, pct), 0);
+        check("theta_call_longs_exceed_shorts", cs ? cl > cs : cl == 0, 1, 0);
+      }
+      check("theta_fixture_opens", opens > 0, 1, 0);
+      // No feasible minimum must skip entry rather than force six longs.
+      theta.theta_threshold = 1e12;
+      auto rejected = w_strategy(ds, theta, true);
+      int rejected_opens = 0;
+      for (const auto& trade : rejected.trades)
+        rejected_opens += trade.action == "open";
+      check("theta_infeasible_skips", rejected_opens, 0, 0);
+      theta.theta_threshold = 0;
+      theta.max_wing_mult = 1;
+      rejected = w_strategy(ds, theta, true);
+      rejected_opens = 0;
+      for (const auto& trade : rejected.trades)
+        rejected_opens += trade.action == "open";
+      check("theta_respects_wing_cap", rejected_opens, 0, 0);
+    }
+  }
+
   auto t0 = std::chrono::steady_clock::now();
   constexpr int N = 20;
   BacktestResult last;
